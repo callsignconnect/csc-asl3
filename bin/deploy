@@ -1,0 +1,13 @@
+#! /bin/bash -e
+
+die() { echo "$@" >&2 ; exit 2 ; }
+[ $# -eq 1 ] || die usage: $0 target_host
+target_host="$1"
+
+repo="$(realpath "$(dirname "$0")"/..)"
+dir="$(basename "$repo")"
+
+rsync -az --delete --exclude=.git/  "$repo"/ $target_host:"$dir"/
+
+#ssh $target_host "sudo LC_ALL=C.UTF-8 LANG=C.UTF-8 ansible-galaxy collection install amazon.aws"
+ssh $target_host "sudo LC_ALL=C.UTF-8 LANG=C.UTF-8 ANSIBLE_CONFIG="$dir"/Ansible/ansible.cfg ansible-playbook -i localhost, "$dir"/Ansible/site.yml -c local"

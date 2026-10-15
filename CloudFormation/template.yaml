@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Blueprint for Call Sign Connect / ASL3 demonstration (Debian 13)'
+
+Resources:
+  # ==========================================
+  # 1. NETWORK ARCHITECTURE LAYER
+  # ==========================================
+  ASLVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}'
+
+  ASLSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ASLVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: false
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ASLVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ASLVPC
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ASLSubnet
+      RouteTableId: !Ref RouteTable
+
+  # ==========================================
+  # 2. IP ASSOCIATION via INSTANCE CONTEXT
+  # ==========================================
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref ASLInstance
+      EIP: !Sub '{{resolve:ssm:/${AWS::StackName}/eip_address}}'
+
+  ASLSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName}'
+      VpcId: !Ref ASLVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 4569
+          ToPort: 4569
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 5198
+          ToPort: 5199
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 10000
+          ToPort: 20000
+          CidrIp: 0.0.0.0/0
+
+  # ==========================================
+  # 3. COMPUTE LAYER & SYSTEM INITIALIZATION
+  # ==========================================
+  # Add a simple IAM Role for the Instance
+  ASLInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ASLInstanceRole
+
+  ASLInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-SSM-Parameter-Isolation'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*'
+
+  ASLInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: '{{resolve:ssm:/aws/service/debian/release/13/latest/amd64}}'
+      SubnetId: !Ref ASLSubnet
+      SecurityGroupIds:
+        - !Ref ASLSecurityGroup
+      IamInstanceProfile: !Ref ASLInstanceProfile # Bind the role to the compute instance
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}'
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
+      UserData:
+        Fn::Base64: !Sub |
+          #! /bin/bash -x
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          passwd -d root
+          hostnamectl set-hostname $(aws ssm get-parameter --name "/${AWS::StackName}/domain_name" --query "Parameter.Value" --output text --region ${AWS::Region})
+          install --directory --mode 700 --owner=admin --group=admin /home/admin/.ssh
+          aws ssm get-parameter --name "/${AWS::StackName}/ssh_public_key" --query "Parameter.Value" --output text --region ${AWS::Region} | install --mode=600 --owner=admin --group=admin /dev/stdin /home/admin/.ssh/authorized_keys
+          apt-get update && apt-get install -y rsync ansible python3-boto3 python3-botocore
+

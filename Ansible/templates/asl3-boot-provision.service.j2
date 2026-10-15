@@ -1,0 +1,14 @@
+[Unit]
+Description=Run ASL3 Configuration Management on Boot
+After=network.target
+After=asterisk.service
+
+[Service]
+Type=oneshot
+Environment="LC_ALL=C.UTF-8" "LANG=C.UTF-8" "ANSIBLE_CONFIG={{ csc_project_dir }}/Ansible/ansible.cfg"
+ExecStart=/usr/bin/ansible-playbook -i 'localhost,' {{ csc_project_dir }}/Ansible/site.yml -c local
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+

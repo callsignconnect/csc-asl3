@@ -1,0 +1,648 @@
+---
+- name: Core ASL3 and Automated Web Layer Provisioning
+  hosts: localhost
+  connection: local
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    # ==========================================
+    # PHASE 1: RECOVERY OF ARCHITECTURE ATTRIBUTES
+    # ==========================================
+    # Reads the host's actual deployment environment label name directly from
+    # Ansible's system facts, matching the name assigned by CloudFormation.
+    - name: Establish stack name context matching CloudFormation configuration
+      set_fact:
+        stack_name: "{{ ansible_hostname }}"
+
+    # IMDSv2 requires fetching a secure token first before querying data
+    - name: Fetch secure IMDSv2 token from the EC2 local hypervisor boundary
+      uri:
+        url: http://169.254.169.254/latest/api/token
+        method: PUT
+        headers:
+          X-aws-ec2-metadata-token-ttl-seconds: "60"
+        return_content: yes
+      register: imds_token
+
+    - name: Query regional placement out of the EC2 instance identity ledger
+      uri:
+        url: http://169.254.169.254/latest/dynamic/instance-identity/document
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ imds_token.content }}"
+        return_content: yes
+      register: instance_identity
+
+    - name: Extract exact regional placement string parameter
+      set_fact:
+        ec2_region: "{{ (instance_identity.content | from_json).region }}"
+
+    # The lookup plugin now resolves perfectly by pointing explicitly to the detected region
+    - name: Fetch configuration parameters from SSM via Scoped Instance Role
+      set_fact:
+        asl_node_number:   "{{ lookup('amazon.aws.aws_ssm', '/' + stack_name + '/asl_node_number',          region=ec2_region) }}"
+        asl_node_password: "{{ lookup('amazon.aws.aws_ssm', '/' + stack_name + '/asl_node_password',        region=ec2_region) }}"
+        domain_name:       "{{ lookup('amazon.aws.aws_ssm', '/' + stack_name + '/domain_name',              region=ec2_region) }}"
+        email_address:     "{{ lookup('amazon.aws.aws_ssm', '/' + stack_name + '/email_address',            region=ec2_region) }}"
+        certbot_args:      "{{ lookup('amazon.aws.aws_ssm', '/' + stack_name + '/certbot_args', default='', region=ec2_region) }}"
+        eip_address:       "{{ lookup('amazon.aws.aws_ssm', '/' + stack_name + '/eip_address',              region=ec2_region) }}"
+
+    # ==========================================
+    # PHASE 2: HOSTNAME ARCHITECTURE MANAGEMENT
+    # ==========================================
+    - name: Map local loops inside system hosts routing ledger
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ domain_name }} {{ domain_name.split('.')[0] }}"
+        state: present
+
+    # ==========================================
+    # PHASE 3: PACKAGE REGISTRATION & INSTALLS
+    # ==========================================
+    - name: Fetch official AllStarLink APT repository bootstrap package safely
+      get_url:
+        url: https://repo.allstarlink.org/public/asl-apt-repos.deb13_all.deb
+        dest: /home/admin/asl-apt-repos.deb13_all.deb
+        mode: '0644'
+
+    - name: Inject the AllStarLink repository registration ledger
+      apt:
+        deb: /home/admin/asl-apt-repos.deb13_all.deb
+      register: repo_package_installed
+
+    # Performance boundary: only run apt-update if a new repository package was actually deployed
+    - name: Refresh package inventory cache selectively
+      apt:
+        update_cache: yes
+      when: repo_package_installed.changed
+
+    - name: Install ASL3, Allmon3, Apache2, Certbot, and Python
+      apt:
+        name:
+          - asl3
+          - allmon3
+          - apache2
+          - python3-certbot-apache
+          - uvicorn
+          - python3-fastapi
+        state: present
+
+    # ==========================================
+    # PHASE 4: WEB SERVICE PROVISIONING LAYER
+    # ==========================================
+    - name: Enable mandatory Apache proxy and SSL sub-modules
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - ssl
+        - headers
+        - proxy
+        - proxy_http
+        - proxy_wstunnel
+      notify: Reload Apache
+
+    - name: Deploy tailored Apache web application configuration site file
+      copy:
+        src: files/h5t.conf
+        dest: /etc/apache2/conf-available/h5t.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Activate the new web application routing configurations
+      command: a2enconf h5t.conf
+      args:
+        creates: /etc/apache2/conf-enabled/h5t.conf
+      notify: Reload Apache
+
+    - name: Append dynamic ARI runtime include hook to configuration
+      lineinfile:
+        path: /etc/asterisk/ari.conf
+        line: '#tryinclude "/run/asterisk/secret/ari-user.conf"'
+        insertafter: EOF
+        state: present
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Swap plain text secret lines for the dynamic runtime include directive
+      lineinfile:
+        path: /etc/asterisk/manager.conf
+        regexp: '^secret\s*='
+        # Wrapped securely to prevent the leading # from acting as a YAML comment
+        line: '#tryinclude "/run/asterisk/secret/manager-secret.conf"'
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Configure standard UDP transport parameters in pjsip.conf
+      community.general.ini_file:
+        path: /etc/asterisk/pjsip.conf
+        section: transport-udp
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      loop:
+        - { option: 'type', value: 'transport' }
+        - { option: 'protocol', value: 'udp' }
+        - { option: 'bind', value: '0.0.0.0:5060' }
+      notify: Restart Asterisk
+
+    - name: Configure WebRTC WebSocket transport boundaries in pjsip.conf
+      community.general.ini_file:
+        path: /etc/asterisk/pjsip.conf
+        section: transport-ws
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      loop:
+        - { option: 'type', value: 'transport' }
+        - { option: 'protocol', value: 'ws' }
+        - { option: 'bind', value: '127.0.0.1:8088' }
+        - { option: 'local_net', value: '10.0.0.0/16' }
+        - { option: 'external_media_address', value: "{{ eip_address }}" }
+        - { option: 'external_signaling_address', value: "{{ eip_address }}" }
+#        - { option: 'nat', value: 'force_rport,comedia' }
+      notify: Restart Asterisk
+
+    - name: Append dynamically verified transceivers include hook to configuration
+      lineinfile:
+        path: /etc/asterisk/pjsip_wizard.conf
+        line: '#tryinclude "/etc/asterisk/custom/pjsip_wizard.conf"'
+        insertafter: EOF
+        state: present
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    # ==========================================
+    # PHASE 4: SERVICE PROVISIONING LAYER
+    # ==========================================
+    - name: Purge any factory default or placeholder node registration entries
+      lineinfile:
+        path: /etc/asterisk/rpt_http_registrations.conf
+        # Matches any string starting with register => followed by numbers
+        regexp: '^register\s*=>\s*1234:'
+        state: absent
+      notify: Reload Asterisk HTTP Registrations
+
+    - name: Inject the dynamic RAM-disk include hook into registrations configuration
+      lineinfile:
+        path: /etc/asterisk/rpt_http_registrations.conf
+        regexp: '^#tryinclude\s*"/run/asterisk/secret/registration\.conf"'
+        line: '#tryinclude "/run/asterisk/secret/registration.conf"'
+        insertafter: '^\[registrations\]'
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Reload Asterisk HTTP Registrations
+
+    # ==========================================
+    # PHASE 4.5: EPHEMERAL SECRET MANAGEMENT
+    # ==========================================
+    - name: Generate an ephemeral 8-character alphanumeric ARI secret
+      set_fact:
+        ari_ephemeral_password: "{{ lookup('community.general.random_string', length=16, base64=true) }}"
+
+    - name: Ensure the volatile secret storage directory exists
+      file:
+        path: /run/asterisk/secret
+        state: directory
+        owner: asterisk
+        group: asterisk
+        mode: '0700' # Strict boundary: accessible only by Asterisk
+
+    - name: Generate the dynamic ari-user.conf configuration file
+      copy:
+        dest: /run/asterisk/secret/ari-user.conf
+        content: |
+          [username]
+          password = {{ ari_ephemeral_password }}
+        owner: asterisk
+        group: asterisk
+        mode: '0600'
+      notify: Restart Asterisk
+
+    - name: Generate an ephemeral 8-character alphanumeric Asterisk Manager secret
+      set_fact:
+        manager_ephemeral_password: "{{ lookup('community.general.random_string', length=16, base64=true) }}"
+
+    - name: Generate the dynamic manager-secret.conf configuration file
+      copy:
+        dest: /run/asterisk/secret/manager-secret.conf
+        content: |
+          secret = {{ manager_ephemeral_password }}
+        owner: asterisk
+        group: asterisk
+        mode: '0600'
+      notify: Restart Asterisk
+
+    - name: Generate the dynamic volatile registration.conf configuration file
+      copy:
+        dest: /run/asterisk/secret/registration.conf
+        content: |
+          register => {{ asl_node_number }}:{{ asl_node_password }}@register.allstarlink.org
+        owner: asterisk
+        group: asterisk
+        mode: '0600'
+      notify: Reload Asterisk HTTP Registrations
+
+    - name: Generate an ephemeral 8-character alphanumeric ARI secret
+      set_fact:
+        ari_ephemeral_password: "{{ lookup('community.general.random_string', length=16, base64=true) }}"
+
+    - name: Ensure the volatile secret storage directory exists
+      file:
+        path: /run/asterisk/secret
+        state: directory
+        owner: asterisk
+        group: asterisk
+        mode: '0700' # Strict boundary: accessible only by Asterisk
+
+    - name: Generate the dynamic ari-user.conf configuration file
+      copy:
+        dest: /run/asterisk/secret/ari-user.conf
+        content: |
+          [username]
+          password = {{ ari_ephemeral_password }}
+        owner: asterisk
+        group: asterisk
+        mode: '0600'
+      notify: Restart Asterisk
+
+    - name: /run/www-data
+      file:
+        path: /run/www-data
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0700'
+
+    - name: /run/www-data/secret
+      file:
+        path: /run/www-data/secret
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0700'
+
+    - name: /run/www-data/secret/csc-placeholder.json existence
+      stat:
+        path: /run/www-data/secret/csc-placeholder.json
+      register: csc_placeholder_file
+
+    - name: csc_placeholder_ephemeral_password
+      set_fact:
+        csc_placeholder_ephemeral_password: "{{ lookup('community.general.random_string', length=16, base64=true) }}"
+      when: not csc_placeholder_file.stat.exists
+
+    - name: /run/www-data/secret/csc-placeholder.json
+      copy:
+        dest: /run/www-data/secret/csc-placeholder.json
+        content: "{{ {'password': csc_placeholder_ephemeral_password } | to_json }}"
+        owner: www-data
+        group: www-data
+        mode: '0600'
+      when: not csc_placeholder_file.stat.exists
+
+    # ==========================================
+    # PHASE 5: HANDS-FREE TLS SECURITY GENERATION
+    # ==========================================
+    - name: Execute automated Certbot deployment
+      command: >
+        certbot --apache
+        --non-interactive
+        --domain {{ domain_name }}
+        --email {{ email_address }}
+        --no-eff-email
+        {{ certbot_args }}
+      args:
+        creates: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
+
+    # ==========================================
+    # PHASE 6: APPLICATION DAEMON & ASSETS INTEGRATION
+    # ==========================================
+    - name: /var/www/html/favicon.ico
+      copy:
+        src: files/favicon.ico
+        dest: /var/www/html/favicon.ico
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Establish secure baseline execution target directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+      loop:
+        - /opt/h5t
+        - /var/www/h5t
+
+    - name: Copy the runtime systemd service descriptor configuration file
+      copy:
+        src: files/h5t.service
+        dest: /etc/systemd/system/h5t.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Systemd Daemons
+
+    - name: Copy the Python API backend core module script
+      copy:
+        src: files/backend.py
+        dest: /opt/h5t/backend.py
+        owner: www-data
+        group: www-data
+        mode: '0644'
+      notify: Restart h5t Service
+
+    - name: Deploy static interface frontend index view
+      copy:
+        src: files/index.html
+        dest: /var/www/h5t/index.html
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Provision local browserified dependency files to web vendor tree
+      copy:
+        src: files/vendor/jssip.js
+        dest: /var/www/h5t/jssip.js
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Set dynamic repository path helper fact
+      set_fact:
+        csc_project_dir: "/home/admin/csc-asl3"
+
+    - name: Deploy the custom systemd boot provisioning unit file
+      template:
+        src: templates/asl3-boot-provision.service.j2
+        dest: /etc/systemd/system/asl3-boot-provision.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Systemd Daemons
+
+    - name: Ensure the boot provisioning service is enabled
+      service:
+        name: asl3-boot-provision
+        enabled: yes
+
+    - name: Deploy the static custom extensions configuration file
+      copy:
+        src: files/extensions.conf
+        dest: /etc/asterisk/custom/extensions.conf
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Append WebRTC endpoint real-time mapping hooks to extconfig.conf
+      blockinfile:
+        path: /etc/asterisk/extconfig.conf
+        insertafter: EOF
+        marker: "; {mark} ANSIBLE MANAGED EXTCONFIG BLOCK"
+        block: |
+          pjsip_auth     => curl,http://127.0.0.1:8000/h5t/api/pjsip/auth
+          pjsip_endpoint => curl,http://127.0.0.1:8000/h5t/api/pjsip/endpoint
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Configure the active AllStarLink Node variable inside globals
+      lineinfile:
+        path: /etc/asterisk/extensions.conf
+        regexp: '^NODE\s*='
+        line: "NODE = {{ asl_node_number }}"
+        insertafter: '^\[globals\]'
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Enable the internal Asterisk HTTP daemon and bind port
+      community.general.ini_file:
+        path: /etc/asterisk/http.conf
+        section: general
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      loop:
+        - { option: 'enabled', value: 'yes' }
+        - { option: 'bindport', value: '8088' }
+      notify: Restart Asterisk
+
+    - name: Deploy the static custom modules configuration file
+      copy:
+        src: files/modules.conf
+        dest: /etc/asterisk/modules.conf
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Deploy the dynamic transceiver verification configuration file
+      copy:
+        src: files/pjsip_wizard.conf
+        dest: /etc/asterisk/custom/pjsip_wizard.conf
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name:
+      community.general.ini_file:
+        path: /etc/asterisk/rpt.conf
+        section: nodes
+        option: "{{ asl_node_number }}"
+        value: "radio@127.0.0.1/{{ asl_node_number }},NONE"
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name:
+      community.general.ini_file:
+        path: /etc/asterisk/rpt.conf
+        section: nodes
+        option: 1999
+        state: absent
+      notify: Restart Asterisk
+
+    - name:
+      community.general.ini_file:
+        path: /etc/asterisk/rpt.conf
+        section: 1999
+        state: absent
+      notify: Restart Asterisk
+
+    - name: Enable the internal Asterisk HTTP daemon and bind port
+      community.general.ini_file:
+        path: /etc/asterisk/http.conf
+        section: general
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      loop:
+        - { option: 'enabled', value: 'yes' }
+        - { option: 'bindport', value: '8088' }
+      notify: Restart Asterisk
+
+    - name: Repeater node configuration
+      template:
+        src: templates/rpt-node.conf.j2
+        dest: /etc/asterisk/custom/rpt/{{ asl_node_number }}.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Systemd Daemons
+
+    - name: /run/allmon3
+      file:
+        path: /run/allmon3
+        state: directory
+        owner: allmon3
+        group: allmon3
+        mode: '0700'
+
+    - name: /run/allmon3/secret
+      file:
+        path: /run/allmon3/secret
+        state: directory
+        owner: allmon3
+        group: allmon3
+        mode: '0700'
+
+    - name: Allmon3 ephemeral configuration (except password)
+      community.general.ini_file:
+        path: /run/allmon3/secret/allmon3.ini
+        section: "{{ asl_node_number }}"
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+        owner: allmon3
+        group: allmon3
+        mode: '0600'
+      loop:
+        - { option: 'host', value: '127.0.0.1' }
+        - { option: 'user', value: 'admin' }
+      notify: Restart Allmon3
+
+    - name: Allmon3 ephemeral configuration (password only)
+      community.general.ini_file:
+        path: /run/allmon3/secret/allmon3.ini
+        section: "{{ asl_node_number }}"
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+        owner: allmon3
+        group: allmon3
+        mode: '0600'
+      loop:
+        - { option: 'pass', value: '{{ manager_ephemeral_password }}' }
+      no_log: true # TODO check for other places that would benefit from this
+      notify: Restart Allmon3
+
+    - name: Link to Allmon3 ephemeral configuration
+      file:
+       src: /run/allmon3/secret/allmon3.ini
+       dest: /etc/allmon3/allmon3.ini
+       state: link
+       force: true # Replace existing file
+      notify: Restart Allmon3
+
+    - name: Mapping to exclude local IP address from ICE candidates
+      lineinfile:
+        path: /etc/asterisk/rtp.conf
+        line: '{{ ansible_default_ipv4.address }} => {{ eip_address }}'
+        insertafter: EOF
+        state: present
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Ensure sorcery.conf contains the target res_pjsip section header
+      lineinfile:
+        path: /etc/asterisk/sorcery.conf
+        line: "[res_pjsip]"
+        insertafter: EOF
+        state: present
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      register: sorcery_header_state
+      notify: Restart Asterisk
+
+    - name: Inject real-time and config mapping matrix into sorcery.conf res_pjsip
+      blockinfile:
+        path: /etc/asterisk/sorcery.conf
+        insertafter: '^\[res_pjsip\]'
+        marker: "; {mark} ANSIBLE MANAGED PJSIP REALTIME BLOCK"
+        block: |
+          auth=realtime,pjsip_auth
+          auth=config,pjsip.conf,criteria=type=auth
+          endpoint=realtime,pjsip_endpoint
+          endpoint=config,pjsip.conf,criteria=type=endpoint
+        owner: asterisk
+        group: asterisk
+        mode: '0640'
+      notify: Restart Asterisk
+
+    - name: Ensure Apache2, Asterisk, Uvicorn, and Allmon3 service targets are running
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - apache2
+        - asterisk
+        - h5t
+        - allmon3
+
+  handlers:
+    - name: Reload Apache
+      service:
+        name: apache2
+        state: reloaded
+
+    - name: Reload Systemd Daemons
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart h5t Service
+      service:
+        name: h5t
+        state: restarted
+
+    - name: Restart Asterisk
+      service:
+        name: asterisk
+        state: restarted
+
+    - name: Reload Asterisk HTTP Registrations
+      command: asterisk -rx "rpt reload http"
+
+    - name: Restart Allmon3
+      service:
+        name: allmon3
+        state: restarted
+

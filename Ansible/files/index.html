@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>H5T Testing Transceiver</title>
+    <script src="jssip.js"></script>
+    <style>
+        body { font-family: monospace; background: #121212; color: #00ff00; padding: 20px; max-width: 450px; margin: auto; }
+        h1 { border-bottom: 1px solid #00ff00; padding-bottom: 5px; font-size: 1.2rem; }
+        .panel { border: 1px solid #00ff00; padding: 15px; margin-bottom: 15px; background: #1e1e1e; }
+        .row { margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+        input, select, button { background: #000; color: #00ff00; border: 1px solid #00ff00; padding: 8px; font-family: monospace; font-size: 1rem; }
+        input[type="text"] { width: 55%; }
+        select { width: 35%; }
+        button { cursor: pointer; }
+        button:disabled { color: #555; border-color: #555; cursor: not-allowed; }
+        .dialpad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 15px 0; }
+        .dialpad button { padding: 12px; font-weight: bold; }
+        .action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+        #pttBtn { grid-column: span 2; padding: 15px; background: #003300; font-weight: bold; font-size: 1.2rem; }
+        #pttBtn:active:not(:disabled) { background: #00ff00; color: #000; }
+        .state-display { font-weight: bold; text-transform: uppercase; padding: 3px 6px; border-radius: 3px; }
+        .DISCONNECTED { background: #330000; color: #ff3333; }
+        .CONNECTING { background: #333300; color: #ffff33; }
+        .CONNECTED { background: #003300; color: #33ff33; }
+        .DISCONNECTING { background: #331a00; color: #ff9933; }
+
+        /* Streaming Telemetry Box */
+        .telemetry-box { height: 80px; overflow-y: scroll; border: 1px dashed #00ff00; background: #050505; padding: 5px; font-size: 0.85rem; color: #33ff33; }
+        .telemetry-line { border-bottom: 1px solid #1a1a1a; padding: 2px 0; }
+    </style>
+</head>
+<body>
+
+    <h1>H5T Diagnostic Console</h1>
+
+    <div class="panel">
+        <div class="row">
+            <span>State:</span>
+            <span id="stateLabel" class="state-display DISCONNECTED">Disconnected</span>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="row">
+            <input type="text" id="dialInput" placeholder="Node / DTMF string" maxlength="32">
+            <select id="historySelect" onchange="useHistoryItem(this.value)">
+                <option value="">Recent...</option>
+            </select>
+        </div>
+
+        <div class="dialpad">
+            <button class="digit-btn" onclick="pressDigit('1')">1</button>
+            <button class="digit-btn" onclick="pressDigit('2')">2</button>
+            <button class="digit-btn" onclick="pressDigit('3')">3</button>
+            <button class="digit-btn" onclick="pressDigit('A')">A</button>
+            <button class="digit-btn" onclick="pressDigit('4')">4</button>
+            <button class="digit-btn" onclick="pressDigit('5')">5</button>
+            <button class="digit-btn" onclick="pressDigit('6')">6</button>
+            <button class="digit-btn" onclick="pressDigit('B')">B</button>
+            <button class="digit-btn" onclick="pressDigit('7')">7</button>
+            <button class="digit-btn" onclick="pressDigit('8')">8</button>
+            <button class="digit-btn" onclick="pressDigit('9')">9</button>
+            <button class="digit-btn" onclick="pressDigit('C')">C</button>
+            <button class="digit-btn" onclick="pressDigit('*')">*</button>
+            <button class="digit-btn" onclick="pressDigit('0')">0</button>
+            <button class="digit-btn" onclick="pressDigit('#')">#</button>
+            <button class="digit-btn" onclick="pressDigit('D')">D</button>
+        </div>
+
+        <div class="action-row">
+            <button id="connectBtn" onclick="initiateConnection()">Connect</button>
+            <button id="disconnectBtn" onclick="terminateConnection()">Disconnect</button>
+        </div>
+        <div class="action-row">
+            <button id="sendBtn" style="grid-column: span 2;" onclick="sendDTMFString()">Send DTMF Code</button>
+        </div>
+        <div class="action-row">
+            <button id="pttBtn" onmousedown="startTX()" onmouseup="stopTX()" onmouseleave="stopTX()">PTT (SPACEBAR)</button>
+        </div>
+    </div>
+
+    <!-- Scrolling Node Message Console -->
+    <div class="panel">
+        <div class="row"><span>ASL3 Telemetry Feed:</span></div>
+        <div id="telemetryConsole" class="telemetry-box"></div>
+    </div>
+
+    <!-- Persistent, Explicit HTML5 Audio Player -->
+    <audio id="h5tAudioOut" autoplay></audio>
+
+<script>
+    const STATES = {
+        DISCONNECTED: 'disconnected',
+        CONNECTING: 'connecting',
+        CONNECTED: 'connected',
+        DISCONNECTING: 'disconnecting'
+    };
+    
+    let currentState = STATES.DISCONNECTED;
+    let ua = null;
+    let activeSession = null;
+    let pastTargets = [];
+    let isTransmitting = false;
+
+    const dialInput = document.getElementById('dialInput');
+    const historySelect = document.getElementById('historySelect');
+    const stateLabel = document.getElementById('stateLabel');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const pttBtn = document.getElementById('pttBtn');
+    const digitBtns = document.querySelectorAll('.digit-btn');
+    const telemetryConsole = document.getElementById('telemetryConsole');
+    const remoteAudio = document.getElementById('h5tAudioOut');
+
+    function updateUIState(newState) {
+        currentState = newState;
+        stateLabel.textContent = newState;
+        stateLabel.className = `state-display ${newState.toUpperCase()}`;
+
+        const isDisconnected = (newState === STATES.DISCONNECTED);
+        const isConnecting = (newState === STATES.CONNECTING);
+        const isConnected = (newState === STATES.CONNECTED);
+        const isDisconnecting = (newState === STATES.DISCONNECTING);
+
+        connectBtn.disabled = !isDisconnected;
+        disconnectBtn.disabled = !(isConnecting || isConnected || isDisconnecting);
+        sendBtn.disabled = !isConnected;
+        pttBtn.disabled = !isConnected;
+        
+        digitBtns.forEach(btn => {
+            btn.disabled = !(isDisconnected || isConnected);
+        });
+    }
+
+    function pressDigit(char) { dialInput.value += char; }
+    function useHistoryItem(val) {  if (val) dialInput.value = val; }
+
+    function saveToHistory(val) {
+        if (!val || pastTargets.includes(val)) return;
+        pastTargets.unshift(val);
+        if (pastTargets.length > 10) pastTargets.pop();
+        historySelect.innerHTML = '<option value="">Recent...</option>';
+        pastTargets.forEach(item => {
+            const opt = document.createElement('option');
+            opt.value = item; opt.textContent = item;
+            historySelect.appendChild(opt);
+        });
+    }
+
+    function logTelemetry(msg) {
+        const line = document.createElement('div');
+        line.className = 'telemetry-line';
+        line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        telemetryConsole.appendChild(line);
+        telemetryConsole.scrollTop = telemetryConsole.scrollHeight;
+    }
+    
+ function initiateConnection() {
+  const targetNode = dialInput.value.trim();
+  if (!targetNode) return;
+
+  navigator.mediaDevices.getUserMedia({ audio: true, video: false }) 
+  .then((stream) => { // Permission granted! We can safely shut pre-flight down
+   stream.getTracks().forEach(track => track.stop());
+
+   saveToHistory(targetNode);
+   dialInput.value = '';
+   updateUIState(STATES.CONNECTING);
+   logTelemetry(`Initiating link request to Node ${targetNode}...`);
+
+   fetch('/h5t/api/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callsign: 'X1CSC', password: localStorage.getItem('csc-placeholder') })
+   })
+   .then(res => res.json())
+   .then(data => {
+            const socket = new JsSIP.WebSocketInterface(data.wss_url);
+            ua = new JsSIP.UA({
+                sockets: [socket],
+                uri: data.sip_uri,
+                password: localStorage.getItem('csc-placeholder'),
+                register: false
+            });
+
+            // ---- INTERCEPT AND ACKNOWLEDGE OUT-OF-BAND SIP MESSAGES ----
+            ua.on('newMessage', (e) => {
+                if (e.originator === 'remote' && e.message) {
+                    // Automatically respond with 200 OK to stop 405 errors
+                    e.message.accept(); 
+                    if (e.request.body) {
+                        logTelemetry(`Node Event: ${e.request.body}`);
+                    }
+                }
+            });
+        ua.on('connected', () => {
+            // ---- BIND LIFECYCLE EVENTS EARLY INSIDE THE OPTIONS OBJECT ----
+            const eventHandlers = {
+                'confirmed': () => {
+                    updateUIState(STATES.CONNECTED);
+                    logTelemetry("SIP Signaling Session Confirmed. Audio Channel Live.");
+                },
+                'ended': () => cleanupSession(),
+                'failed': (e) => {
+                    logTelemetry(`Session Failed: ${e.cause}`);
+                    console.log(e);
+                    cleanupSession();
+                },
+                // TRAP OUT-OF-BAND SIP MESSAGES WITHIN CALL DIALOG
+                'newMessage': (e) => {
+                    if (e.originator === 'remote' && e.request) {
+                        e.request.reply(200); // Send immediate signaling ack
+                        if (e.request.data) {
+                            logTelemetry(`Node Status: ${e.request.data}`);
+                        }
+                    }
+                },
+                // HARDENED PEERCONNECTION EVENT: FIRED SYNCHRONOUSLY AT CALL START
+                'peerconnection': (data) => {
+                    console.log("Synchronous PeerConnection initialized:", data.peerconnection);
+                    
+                    data.peerconnection.addEventListener('track', (e) => {
+                        console.log("Processing incoming WebRTC stream track:", e);
+                        
+                        if (e.streams && e.streams[0]) {
+                            remoteAudio.srcObject = e.streams[0];
+                        } else {
+                            remoteAudio.srcObject = new MediaStream([e.track]);
+                        }
+                        
+                        remoteAudio.play().catch(err => {
+                            console.log("Audio play deferred until user action:", err);
+                        });
+                    });
+                }
+            };
+
+            const options = {
+                eventHandlers: eventHandlers, // Passes hooks directly into the instantiation queue
+                mediaConstraints: { audio: true, video: false },
+                rtcOfferConstraints: { offerToReceiveAudio: 1, offerToReceiveVideo: 0 }
+            };
+
+            // Launch the session channel securely
+            activeSession = ua.call(`sip:${targetNode}`, options);
+        });
+
+            ua.on('registrationFailed', () => updateUIState(STATES.DISCONNECTED));
+            ua.start();
+         })
+  })
+  .catch((err) => {
+   console.log(err);
+   alert("Microphone access denied or unavailable. Cannot connect."); <!-- TODO in fact all errors land here -->
+   updateUIState(STATES.DISCONNECTED);
+  });
+ }
+
+    function terminateConnection() {
+        if (currentState === STATES.DISCONNECTED) return;
+        updateUIState(STATES.DISCONNECTING);
+        logTelemetry("Terminating connection loop...");
+        if (activeSession) { activeSession.terminate(); } else { cleanupSession(); }
+    }
+
+    function cleanupSession() {
+        if (ua) { ua.stop(); }
+        ua = null;
+        activeSession = null;
+        isTransmitting = false;
+        if (remoteAudio) { remoteAudio.srcObject = null; }
+        updateUIState(STATES.DISCONNECTED);
+        logTelemetry("Disconnected.");
+    }
+
+    function sendDTMFString() {
+        const payload = dialInput.value.trim();
+        if (!payload || !activeSession || currentState !== STATES.CONNECTED) return;
+        logTelemetry(`Sending Keypad Commands: ${payload}`);
+        activeSession.sendDTMF(payload);
+        dialInput.value = '';
+    }
+
+function startTX() {
+ if (isTransmitting || currentState !== STATES.CONNECTED || !activeSession) return;
+ isTransmitting = true;
+  logTelemetry("PTT: KEY DOWN [TX]");
+ activeSession.sendInfo('application/asterisk-features', 'PTT=1');
+ activeSession.sendDTMF('*99');
+}
+
+function stopTX() {
+ if (!isTransmitting || currentState !== STATES.CONNECTED || !activeSession) return;
+ isTransmitting = false;
+ logTelemetry("PTT: KEY UP [RX]");
+ activeSession.sendInfo('application/asterisk-features', 'PTT=0');
+ activeSession.sendDTMF('#');
+}
+
+window.addEventListener('keydown', (e) => {
+ if (e.code === 'Space' && document.activeElement !== dialInput) {
+  e.preventDefault(); startTX();
+ }
+});
+
+window.addEventListener('keyup', (e) => {
+ if (e.code === 'Space') { e.preventDefault();stopTX(); }
+});
+
+updateUIState(STATES.DISCONNECTED);
+
+</script>
+</body>
+
