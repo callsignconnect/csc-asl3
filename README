@@ -57,7 +57,7 @@ This is a minimally-operational prototype of an HTML5/WebRTC transceiver for ASL
  2. Press Connect
   * If all is well, the red DISCONNECTED label at the top right will be replaced with a green CONNECTED label
   * Watching the dashboard at https://{fqdn}/allmon3/ is probably helpful to work out what's happening
- 3. Enter *55553 and Send DTMF Code
+ 3. Enter *355553 and Send DTMF Code
   * If all is well you'll see the connect on Allmon3 and hear a message from the parrot at 55553
  4. Talk to the parrot
   * There is a real need to add buffering; you'll probably need to hold PTT for a couple of seconds before and after you speak
