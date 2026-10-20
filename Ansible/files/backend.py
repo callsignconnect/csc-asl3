@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Any
+from typing import Any, Mapping
+from urllib.parse import urlencode
 import requests
 import socket
 import json
@@ -48,6 +49,10 @@ async def verify_identity(payload: VerificationRequest):
 from fastapi import FastAPI, Form, Response
 from typing import Optional
 
+def encode_realtime_payload(payload: Mapping[str, Any]) -> str:
+ """Encode Asterisk realtime fields as URL-escaped key=value pairs."""
+ return urlencode(payload)
+
 def validate_oid4vc_token():
  return True
 
@@ -78,42 +83,36 @@ async def pjsip_realtime_endpoint(
 ##  if validate_oid4vc_token(token, expected_user=id):
 # Bypass the MD5 challenge completely by telling Asterisk 
 # this endpoint is pre-authorized (No auth block required)
- payload = (
-  f"id={id}&"
-  "type=endpoint&"
-  "context=from-webrtc&"
-  "allow=ulaw&" #TODO work out how to get Opus support back ; requires a F/OSS codec that Debian 13 is missing
-  f"auth=auth_{call_sign}&"
-  "webrtc=yes&"
-  "use_avpf=yes&"              # Mandated for WebRTC audio feedback profiles
-  "rtcp_mux=yes&"              # Multiplexes RTCP over the single audio port
-#  "ice_support=yes&"           # Activates WebRTC firewall hole punching mechanics
-  "media_encryption=dtls&"
-  "dtls_verify=no&"
-  "dtls_setup=actpass"
-  "dtls_auto_generate_cert=yes&"
-# ---- CRITICAL MISSING LINK FOR WEB_RTC CURL LOOKUPS ----
- # "asymmetric_rtp_codec=yes&"   # Instructs Asterisk to allow independent asymmetrical media paths
-  "media_use_received_transport=yes" # Locks Asterisk media engine to the proxy interface
-  "rtp_symmetric=yes&"          # Enforce symmetric media routing
-  "force_rport=yes&"             # Enforce remote port alignment
-#  "rewrite_contact=yes&"
-  "direct_media=no&"
-  "rtp_keepalive=1&"
-    # ---- FORCE PURE SYMMETRIC COMEDIA ROUTING OVER ICE ----
-   #   "media_address=13.250.78.226&" # TODO This is csc-dev
-    # ---- THE CRITICAL ICE ENFORCEMENT PARAMETER FOR DUAL-NAT ----
-    # This translates the private candidate into your public EIP on the fly
-#            "timers=no&"                  # Force disables Asterisk session timer tracking
-#        "send_connected_line=no"      # Prevents out-of-band message flood
-        # ---- HEAL 408 TIMEOUT BY ENFORCING SERVER-SIDE KEEPALIVE ----
-        "timers=required&"             # Instructs Asterisk to drive the session clock
-        "timers_min_se=90&"            # Sets the minimum baseline interval
-        "send_connected_line=yes"      # Allows node telemetry messages to flow
-
- )
+ payload = {
+  "id": id,
+  "type": "endpoint",
+  "context": "from-webrtc",
+  "allow": "ulaw", # TODO restore Opus when a F/OSS codec is available on Debian 13
+  "auth": f"auth_{call_sign}",
+  "webrtc": "yes",
+  "use_avpf": "yes", # WebRTC audio feedback profiles
+  "rtcp_mux": "yes", # Multiplex RTCP over the audio port
+  # "ice_support": "yes",
+  "media_encryption": "dtls",
+  "dtls_verify": "no",
+  "dtls_setup": "actpass",
+  "dtls_auto_generate_cert": "yes",
+  # "asymmetric_rtp_codec": "yes",
+  "media_use_received_transport": "yes", # Lock media to the proxy interface
+  "rtp_symmetric": "yes",
+  "force_rport": "yes",
+  # "rewrite_contact": "yes",
+  "direct_media": "no",
+  "rtp_keepalive": "1",
+  # "media_address": "13.250.78.226", # TODO this is csc-dev
+  # "timers": "no",
+  # "send_connected_line": "no",
+  "timers": "required", # Asterisk drives the session clock
+  "timers_min_se": "90",
+  "send_connected_line": "yes", # Allow node telemetry messages
+ }
  print (f"returning")
- return Response(content=payload, media_type="text/plain")
+ return Response(content=encode_realtime_payload(payload), media_type="text/plain")
 
 # --------------------------------------------------
 
@@ -129,13 +128,13 @@ async def pjsip_realtime_auth(id: Optional[str] = Form(None)):
 
     # Return flat key-value pairs required by res_config_curl
     # Asterisk requires plaintext secrets to verify MD5 challenges over the wire
-    payload = (
-        f"id={id}&"
-        "auth_type=md5&"
-        f"username={call_sign}&"
-        f"password={csc_placeholder.get('password')}"
-    )
-    return Response(content=payload, media_type="text/plain")
+    payload = {
+        "id": id,
+        "auth_type": "md5",
+        "username": call_sign,
+        "password": csc_placeholder.get('password'),
+    }
+    return Response(content=encode_realtime_payload(payload), media_type="text/plain")
 
 # --------------------------------------------------
 
