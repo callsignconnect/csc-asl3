@@ -1,6 +1,6 @@
 # Draft: Call Sign Connect credential profile and SIP guest authorization
 
-Status: discussion draft 0.3. This document specifies intended behavior; it does
+Status: discussion draft 0.4. This document specifies intended behavior; it does
 not describe functionality already implemented by the prototype. Accepted
 decisions are stated explicitly. Remaining format choices, configuration-key
 names, and illustrative examples are subject to review.
@@ -64,11 +64,11 @@ machinery rather than parallel application-specific equivalents.
 | Item | Requirement and meaning |
 | --- | --- |
 | `vct` | Required exact value `tag:callsignconnect.cloud,2026-10:call-sign-attestation:1`. |
-| `iss` | Required issuer identifier. An identifier or name alone never establishes trust. |
+| `iss` | Required issuer identifier; the project's default issuer uses `tag:callsignconnect.cloud,2026-10:issuer`. Resolve it only through supplied trust material, never remote issuer discovery. An identifier alone does not establish trust. |
 | `iat` | Required issuance time. It does not replace the assertion's validity interval. |
 | `nbf`, `exp` | Required start and end of the time interval for which the issuer attests the holder's right to assert the call sign. Accept only while `nbf <= now < exp`, subject to a small configured clock tolerance. |
 | `cnf` | Required binding to the holder's public key, as specified by the chosen SD-JWT VC profile. |
-| Credential status reference | Required means of checking revocation or suspension against locally cached status material. Its exact wire representation remains to be selected. |
+| Credential status reference | Required identification of a bundled W3C Bitstring Status List and an index within it. Section 3.3 shows a proposed project reference claim; section 4 defines local-only list resolution. |
 
 The CPS must ensure that the issued interval does not exceed the interval
 supported by the evidence or delegation. These dates do not imply that a
@@ -95,6 +95,14 @@ date identifies the domain-control namespace and is not a credential issuance
 date or expiry date. Use of that namespace assumes the
 project controlled `callsignconnect.cloud` at the specified time.
 
+The default issuer identifier is `tag:callsignconnect.cloud,2026-10:issuer`,
+not an HTTPS issuer-metadata location. Bind this identifier to the certified
+or directly pinned signing material supplied in the trust list. SD-JWT VC's
+optional HTTPS JWT VC Issuer Metadata discovery mechanism is not used. The
+certificate-based mechanism or an explicitly configured project key resolver
+must verify the signature and its authorized trust path. Merely extracting a
+public key from an `x5c` header does not establish that trust.
+
 SD-JWT VC does not require an HTTPS `vct`. A tag URI has no automatic HTTPS
 retrieval location. At issuance, the issuer supplies type metadata directly to
 the wallet; the delivery mechanism is deferred until issuer integration. At
@@ -106,10 +114,16 @@ comparison, the EUDI PID issuer uses `urn:eudi:pid:1` for Person Identification
 Data; the type describes the attested subject matter rather than using the
 generic word `credential` or `certificate`.
 
-Pin the accepted SD-JWT VC and OpenID4VP versions, key-binding requirements,
-and permitted cryptographic algorithms in the deployment profile. Select a
-supported walt.id release and verify those capabilities before implementation;
-the choice of product does not establish that its defaults meet this document.
+Record the supported specification versions and protocol options. This means
+the precise SD-JWT VC/underlying SD-JWT specification revisions, the
+`dc+sd-jwt` credential format and required holder binding, approved signature
+algorithms, and OpenID4VP 1.0 with its chosen query/response options. In
+particular, distinguish the final DCQL-based OpenID4VP protocol from older
+drafts using Presentation Exchange definitions. This is an interoperability
+configuration, not a further assurance level or a requirement to adopt another
+ecosystem profile. Select a supported walt.id release and test those exact
+capabilities; the choice of product does not establish that its defaults meet
+this document.
 
 ### 3.2 Application claims
 
@@ -146,7 +160,7 @@ browser-supplied value.
 The `vct` versions the claim meanings. The CPS URI versions the enrolment and
 evidence procedure. They serve different purposes. A mutable URL such as
 `/cps/current` is insufficient as the sole CPS reference. A project issuer's
-reference may be `https://callsignconnect.cloud/cp-cps-1.0`. No component needs
+reference is `https://callsignconnect.cloud/issuer/cp-cps-1.0`. No component needs
 the CPS document to complete issuance or verification automatically, so it
 need not be proactively delivered or cached. It must not be fetched during
 login. The holder/subject may open its URI in a browser to read the procedure.
@@ -154,14 +168,15 @@ login. The holder/subject may open its URI in a browser to read the procedure.
 ### 3.3 Illustrative disclosed claims
 
 This is a logical claim-set illustration, not an encoded SD-JWT or an issuable
-example. The type identifier is selected; the issuer URL and holder-key
-coordinates are placeholders. `X1CSC` is a synthetic example and would require
-an appropriate test trust-list delegation. Status metadata is omitted pending
-the status-format decision.
+example. The type and default issuer identifiers and CPS URL are selected;
+holder-key coordinates are placeholders. `X1CSC` is synthetic and requires an
+appropriate test trust-list delegation. The status-list URL and index are
+illustrative, and the `credentialStatus` spelling is a proposed project
+extension as explained below.
 
 ```json
 {
-  "iss": "https://issuer.example.invalid",
+  "iss": "tag:callsignconnect.cloud,2026-10:issuer",
   "vct": "tag:callsignconnect.cloud,2026-10:call-sign-attestation:1",
   "iat": 1792540800,
   "nbf": 1792540800,
@@ -176,10 +191,42 @@ the status-format decision.
   },
   "call_sign": "X1CSC",
   "cps": {
-    "uri": "https://callsignconnect.cloud/cp-cps-1.0"
+    "uri": "https://callsignconnect.cloud/issuer/cp-cps-1.0"
+  },
+  "credentialStatus": {
+    "type": "BitstringStatusListEntry",
+    "statusPurpose": "revocation",
+    "statusListIndex": "42",
+    "statusListCredential": "https://callsignconnect.cloud/verifiers/status/revocation-1",
+    "statusSize": 1
   }
 }
 ```
+
+The per-credential status reference identifies **which list**, **which entry**,
+and **what the entry means**. It does not embed the list in each credential.
+The proposed object reuses W3C Bitstring Status List entry fields: the index is
+a decimal string, and `statusSize: 1` explicitly selects one bit per entry.
+For the illustrated revocation purpose, zero means not revoked and one means
+revoked. An entry `id` is optional and is omitted here. Assign indices without
+deriving them from call signs or other identity information.
+
+SD-JWT VC is distinct from W3C's Verifiable Credentials Data Model. Its native
+`status.status_list` mechanism refers to the IETF Token Status List, which is
+not the W3C Bitstring Status List selected here. Using `credentialStatus` as
+shown is therefore an explicit project SD-JWT VC extension, not a claim of
+generic status interoperability or of W3C conformance for the enclosing holder
+credential. Keep this required reference directly in the issuer-signed claims,
+not selectively disclosable; reject it if missing, malformed, or unsupported.
+The status-list credential itself follows the W3C Bitstring Status List format.
+
+Resolve `statusListCredential` by exact identifier against the complete list
+included in the authenticated trust bundle. The illustrative HTTPS value is
+an identifier for that supplied object, not permission to fetch it. No match
+means rejection, with no network fallback. Bounds-check the index, match the
+list's purpose, and verify the list's authorized signer and securing mechanism.
+The precise extension spelling and signed list representation remain to be
+tested against the selected verifier implementation.
 
 ### 3.4 Deferred attributes and use cases
 
@@ -225,6 +272,38 @@ trusted issuers and validate their signing authority. Supply type metadata
 locally as described in section 3.1. A provisioned set must allow correct
 operation without first fetching remote metadata or other referenced objects.
 
+### 4.1 Publication roles and supplied status lists
+
+The project separates publication by role:
+
+| Location | Contents |
+| --- | --- |
+| `https://callsignconnect.cloud/issuer/` | Material published by or for the default issuer, including `cp-cps-1.0`, except material required for automated verifier processing. |
+| `https://callsignconnect.cloud/verifiers/` | Trust list, attached signing/trust material, complete status information, and other public material needed for automated verifier processing. |
+| Other paths under `https://callsignconnect.cloud/` | General project material. |
+
+The issuer's tag identifier is independent of its publication directory.
+Neither that identifier nor the directory grants a metadata-discovery route.
+All automated issuer information comes from the trust list and attached
+material. Human access to the CPS is separate from verifier processing.
+
+Use W3C Bitstring Status List v1.0 for credential status. Include the complete
+secured status-list credential, including its encoded bitstring and required
+verification material, with the trust list rather than supplying only a link.
+If more than one list is required, include every list referenced by the
+accepted credentials. Preserve the list's identifier so the resolver can find
+it locally. This publication/distribution choice does not require a verifier
+to contact either the issuer or a status-list URL during verification.
+
+The list signer must be authorized for the relevant credential status. It may
+be distinct from the credential issuer only through explicit trust delegation.
+The bundle's authenticated association with a list and the list's own securing
+format must be defined; do not discard signatures or treat an arbitrary
+embedded bitstring as authorized status material. Select a supported securing
+representation without introducing remote JSON-LD/context resolution.
+
+### 4.2 Refresh, freshness, and holdover
+
 Attempt an automatic refresh of the trust list, public trust material, and
 revocation/status artifacts every 24 hours. Authenticate downloads using pinned
 project/issuer signing authority as appropriate, preserve TLS verification,
@@ -238,13 +317,13 @@ Distinguish these objects even if one distribution mechanism carries them:
 - Removal or limitation of an issuer's project delegation.
 - Revocation of an issuer signing certificate/key, including any applicable
   X.509 certificate revocation list (CRL).
-- Revocation or suspension of an individual credential, potentially represented
-  by a signed bitstring status list.
+- Revocation or suspension of an individual credential, represented by the
+  complete Bitstring Status List material attached to the trust list.
 
-The last item is not automatically the same format or object as an X.509 CRL.
-Choose the credential-status representation and its SD-JWT reference before
-finalizing the wire profile. Pin or authenticate the status-list signer's
-authority; a status URL in a credential does not authorize arbitrary content.
+The last item is not the same format or object as an X.509 CRL. The status-list
+format is selected; finalize the SD-JWT reference extension and signed
+representation during integration. A status URL does not authorize content or
+network retrieval independently of the trust bundle.
 
 All login, resumption, and new-call validation uses the locally supplied
 snapshot. Do not fetch issuer metadata, keys, trust chains, type metadata, CRLs,
@@ -583,6 +662,8 @@ integration points before choosing implementation details:
   persistent user or per-call files.
 - Local type/issuer/trust metadata delivery and the two cache-failure modes,
   with no remote metadata-resolution fallback.
+- Local-only resolution of the complete bundled Bitstring Status List, with a
+  required reference/presence check and no silently skipped status policy.
 - Sealed-cookie resumption with no persistent server-side visitor record.
 - Selection of per-call `P`/`S` mode, command isolation, and the mode-dependent
   PTT sequences, including concurrent callers with different modes.
@@ -592,6 +673,17 @@ integration points before choosing implementation details:
 Use the existing `Rpt()` mode argument for command policy. Do not add an
 authorization-expiry call timer. Mode behavior, linked-node behavior, PTT,
 normal call-end cleanup, and the interaction with `app_rpt` need real tests.
+
+The tag issuer and offline status policy require explicit verifier integration.
+Current walt.id source can extract a verification key from an `x5c` header for
+a tag issuer, but a tag plus `kid` alone does not automatically select a locally
+pinned bare key. Supply the required resolver and independently enforce
+certificate/key authorization. Its built-in status policy also has a remote
+fetch path and can report status policy unavailable when the reference is
+absent. Do not enable that behavior as an admission shortcut: provide a local
+bundle resolver/policy and separately enforce the mandatory status reference.
+These are source-inspection findings, not proof of behavior in the release
+eventually selected for deployment.
 
 ## 8. Acceptance examples
 
@@ -624,15 +716,21 @@ These are future integration-test requirements, not tests already executed.
 | A daily refresh revokes the credential or issuer after token issuance | Reject subsequent calls/resumptions; do not actively terminate already admitted calls. |
 | Repeated INVITE belongs to the same SIP transaction | Do not create another call or consume another admission. |
 | Verifier observes an unknown signing key or status reference | Reject using local data only; schedule any investigation/refresh separately. |
+| Default issuer uses the tag identifier, and its signing key is authorized by supplied material | Verify without HTTPS issuer discovery; do not infer trust from the identifier. |
+| Credential refers to a Bitstring Status List included in the trust bundle | Check the indicated entry using that exact local list, without a status-URL request. |
+| Required status reference is missing or the referenced list is absent | Reject; a skipped/unavailable status policy is not success. |
 
 ## 9. Decisions remaining before implementation
 
-1. Finalize CPS identifiers and the status-reference claim shape. The `vct` is
-   selected; additional attributes, licence-class vocabularies, and remote-HF
-   assurance policy are deferred.
-2. Pin the SD-JWT VC/OpenID4VP release profile, derive the call-sign syntax
-   validator from the cited Radio Regulations provisions, and select the
-   credential-status representation, including suspension semantics.
+1. Confirm the project SD-JWT status-reference extension and signed Bitstring
+   Status List representation. The `vct`, default issuer identifier, default
+   CPS URL, publication roles, and full-list bundling are selected. Additional
+   attributes, licence-class vocabularies, and remote-HF assurance policy are
+   deferred.
+2. Record the supported specification versions and protocol options for
+   SD-JWT VC/SD-JWT and OpenID4VP, derive the call-sign syntax validator from
+   the cited Radio Regulations provisions, and settle the supported status
+   purposes, including any suspension semantics.
 3. Specify the signed trust-list/delegation format and prefix-scope encoding,
    issuer certification rules, local metadata interfaces, and complete snapshot
    refresh/holdover mechanics. The refresh interval and default maximum age
@@ -651,8 +749,11 @@ These are future integration-test requirements, not tests already executed.
 - [RFC 7118: SIP over WebSocket](https://www.rfc-editor.org/rfc/rfc7118.html).
 - [SD-JWT-based Verifiable Credentials](https://datatracker.ietf.org/doc/draft-ietf-oauth-sd-jwt-vc/).
 - [SD-JWT VC type identifiers and metadata](https://github.com/oauth-wg/oauth-sd-jwt-vc/blob/main/draft-ietf-oauth-sd-jwt-vc.md).
+- [W3C Bitstring Status List v1.0](https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/), especially BitstringStatusListEntry and privacy-preserving distribution.
 - [RFC 4151: The tag URI Scheme](https://www.rfc-editor.org/rfc/rfc4151.html).
 - [EUDI reference issuer PID type metadata](https://github.com/eu-digital-identity-wallet/eudi-srv-pid-issuer/blob/main/src/main/resources/vct/pid_v1.4.json).
 - [OpenID for Verifiable Presentations 1.0](https://openid.net/specs/openid-4-verifiable-presentations-1_0.html).
 - [walt.id Verifier API 2](https://github.com/walt-id/waltid-identity/tree/main/waltid-services/waltid-verifier-api2).
+- [walt.id key resolver source inspected](https://github.com/walt-id/waltid-identity/blob/dac938ca5a7e2d9dd67aa65f94a88ef03d201c90/waltid-libraries/credentials/waltid-credential-key-resolver/src/commonMain/kotlin/id/walt/credentials/keyresolver/Crypto2JwtKeyResolver.kt).
+- [walt.id status-policy implementation inspected](https://github.com/walt-id/waltid-identity/blob/dac938ca5a7e2d9dd67aa65f94a88ef03d201c90/waltid-libraries/credentials/waltid-verification-policies2/src/commonMain/kotlin/id/walt/policies2/vc/policies/status/StatusPolicyImplementation.kt).
 - [app_rpt mode documentation and implementation](https://github.com/AllStarLink/app_rpt/blob/22b60b5de6a7d99e3042f9b413d129dee3b97ad0/apps/app_rpt.c#L367).
