@@ -1,10 +1,12 @@
 # Draft: verifier resource bundle
 
-Status: proposal for review. This defines a possible distribution format, not
-an implemented endpoint or a new credential format. The credential profile is
-in [credential-profile-and-authorization-policy.md](credential-profile-and-authorization-policy.md).
+Status: draft schema. The selected container and signing roles below record
+accepted decisions; the precise adapter schema is still to be finalized. This
+does not define an implemented endpoint or a new credential format. The
+credential profile is in
+[credential-profile-and-authorization-policy.md](credential-profile-and-authorization-policy.md).
 
-## 1. Requirements and recommended container
+## 1. Requirements and selected container
 
 Fetch one HTTPS resource, for example
 `https://callsignconnect.cloud/verifiers/bundle.jws`, as a single file. The
@@ -12,7 +14,7 @@ normal refresh interval is 24 hours. After complete download and validation,
 accept the entire snapshot atomically; no request triggered by a credential
 presentation resolves additional resources.
 
-The recommended initial container is a **JSON payload inside a compact JWS**.
+The selected container is a **JSON payload inside one compact JWS**.
 The payload contains the trust list and all resources directly. Use an existing
 JOSE implementation to sign and verify the exact JWS payload bytes. JSON
 canonicalization is not needed when verifying those original bytes. This is
@@ -20,7 +22,7 @@ a signed data file, not an archive that must be unpacked before validation.
 
 | Option | Trade-off |
 | --- | --- |
-| Compact JWS containing JSON and complete embedded resources | Fits existing JOSE tooling; one signature/file; no archive paths or extraction semantics. Base64url adds size overhead, normally acceptable for this bundle. Recommended initially. |
+| Compact JWS containing JSON and complete embedded resources | Selected. Fits existing JOSE tooling; one signature/file; no archive paths or extraction semantics. Base64url adds size overhead, normally acceptable for this bundle. |
 | ZIP or tar.gz containing resources and an embedded signed manifest | Appropriate if there are many binary resources. The manifest must bind every accepted file by identifier, size, and digest. Reject duplicate names, unlisted content, traversal paths, links, and decompression excesses; validate before installation. More machinery than the initial bundle needs. |
 | CMS SignedData or COSE_Sign1 containing the snapshot | Standard single-file signed containers. CMS fits X.509 tooling; COSE/CBOR is compact. Both add another protocol/tooling family without an immediate need here. |
 
@@ -31,35 +33,50 @@ keys in this public artifact.
 
 ## 2. Signing authority
 
-Provision the project trustee/bundle verification key independently in the
-verifier's deployment configuration. A key delivered inside an otherwise
-untrusted candidate bundle cannot authorize that bundle's own signature.
+Provision a set of authorized project certificates independently in the
+verifier's local deployment configuration. That locally provisioned set is
+the authority for verifying the outer bundle. Accept the compact JWS when its
+one signature verifies under any one certificate's authorized public key;
+this is not threshold or multi-party signing. A key or certificate delivered
+inside an otherwise untrusted candidate bundle cannot authorize that bundle's
+own signature or change the locally authorized set.
 
-An initial recommendation is ES256 with a P-256 signing key. Keep the bundle
-signing role distinct from credential issuance and status signing, even if
-the project operates all three. A signed issuer entry delegates authority
-from the project trustee to that issuer/key; a separate X.509 delegation
-certificate is optional if this signed-list delegation format is accepted.
-Existing issuer certificates can still be included for the verifier's
-certificate-based key-resolution path.
+Use P-256 keys with ES256 for this integration. Keep separate keys for the
+bundle, the default issuer's credentials, and its status lists, even when the
+project operates all three. A signed issuer entry delegates the recorded
+credential or status authority to its listed key and scope; it does not grant
+that key bundle-signing authority.
+
+| Signing role | What it proves and authorizes |
+| --- | --- |
+| Bundle signer | Authenticates the complete resource snapshot and its issuer/key delegations. Its public key is authorized only by the locally provisioned project certificate set. |
+| Credential signer | Attests the credential's claims. Its bundle entry grants only the listed credential types and call-sign prefixes. |
+| Status-list signer | Authenticates status values for explicitly listed status-list identifiers. Credential-signing authority does not grant this role, or vice versa. |
+| Holder key | Proves that the presenting wallet controls the key bound to the credential. It does not authorize credential issuance, status publication, or bundle signing. |
+
+Trust infrastructure, root/intermediate hierarchy, multi-party distribution,
+and the provisioning/rotation lifecycle of the local project certificate set
+are outside this integration's scope. Do not introduce new certificate-path
+validation or root requirements for bundle acceptance. The locally provisioned
+authorized certificate keys are sufficient.
 
 The protected JWS header should contain a fixed application type, the approved
 algorithm, and a signer identifier such as
 `tag:callsignconnect.cloud,2026-10:trustee-key:1`. Treat the identifier as a
-lookup into provisioned keys, never a network location or permission to trust
-an embedded key. Algorithm acceptance is configured per role; the candidate
-cannot expand it by choosing a header value.
+lookup into locally provisioned authorized certificate keys, never a network
+location or permission to trust an embedded key. Algorithm acceptance is
+configured per role; the candidate cannot expand it by choosing a header value.
 
-Signer rotation must be authenticated by an already trusted authority or
-delivered through administrator configuration. A single compact JWS uses one
-signer; if simultaneous signatures become necessary, JWS General JSON
-Serialization is an alternative container revision. Do not require a root-key
-change merely to rotate an issuer's credential-signing key.
+The candidate bundle cannot authorize a new bundle signer. Managing the local
+certificate set is a deployment concern outside this schema. Multiple keys
+may be locally authorized at once, but any one valid signature is sufficient.
+Issuer credential-key rotation is represented separately in the bundle and
+does not change the local bundle-signing authority.
 
 ## 3. Trust-list contents
 
-Yes: a JSON list of issuers, public keys, and prefixes is the right starting
-point. A useful minimal record also needs an unambiguous issuer identifier,
+A JSON list records issuers, public keys, and prefixes. Each record also needs
+an unambiguous issuer identifier,
 key identity/role, credential-type scope, and a list of permitted prefix
 expressions. The display name is informational.
 
@@ -72,8 +89,9 @@ Proposed fields:
 | Monotonic sequence | Detect rollback relative to the last accepted snapshot. Re-fetching the same snapshot does not advance it. |
 | Signed publication time | Determine snapshot age; downloading old signed bytes again must not make them fresh. |
 | Issuer identifier and display name | Match the declared issuer; provide a human-readable label without making the label a trust anchor. |
-| Authorized signing keys/certificates | Public material and stable key identity, with explicit credential/status-signing roles and any validity bounds. |
+| Authorized signing keys/certificates | Public material and stable key identity, with distinct credential/status-signing roles and any validity bounds. These are not bundle trust anchors. |
 | Credential-type and prefix delegation | Limit which type and call-sign namespace each key can attest. |
+| Status-list delegation | Explicitly list the status-list identifiers each status key may sign; no authority is inherited from credential-type or prefix scope. |
 | Complete resource map | Type metadata, signed Status List Tokens, and any other material required by validation, indexed by tag identifiers. |
 
 Key rotation requires more than one simultaneously listed key when old
@@ -111,18 +129,31 @@ distribution endpoint and human-readable CPS reference need HTTPS URLs.
       "name": "Call Sign Connect default issuer",
       "keys": [
         {
-          "id": "tag:callsignconnect.cloud,2026-10:issuer-key:1",
+          "id": "tag:callsignconnect.cloud,2026-10:credential-key:1",
           "jwk": {
             "kty": "EC",
             "crv": "P-256",
-            "x": "<public-key-x>",
-            "y": "<public-key-y>"
+            "x": "<credential-public-key-x>",
+            "y": "<credential-public-key-y>"
           },
-          "uses": ["credential", "status-list"],
+          "uses": ["credential"],
           "credential_types": [
             "tag:callsignconnect.cloud,2026-10:call-sign-attestation:1"
           ],
           "prefixes": ["X1"]
+        },
+        {
+          "id": "tag:callsignconnect.cloud,2026-10:status-key:1",
+          "jwk": {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "<status-public-key-x>",
+            "y": "<status-public-key-y>"
+          },
+          "uses": ["status-list"],
+          "status_lists": [
+            "tag:callsignconnect.cloud,2026-10:status-list:1"
+          ]
         }
       ]
     }
@@ -144,26 +175,35 @@ distribution endpoint and human-readable CPS reference need HTTPS URLs.
 }
 ```
 
-This example gives one issuer key both credential and status roles explicitly;
-it does not make that the required key arrangement. The bundle trustee key is
-not taken from this payload. Any X.509 chains, additional issuer metadata,
-and further status lists needed by the selected verifier must also be supplied.
+This example uses separate credential and status-list keys. Only the
+credential key carries `credential_types` and `prefixes`; the status key's
+`status_lists` authorizes exactly the matching resource identifier. Neither
+key is a bundle trust anchor. The bundle signer is selected from the separate
+locally provisioned project certificate set, not from this payload. Any
+additional public verification material and status lists needed by the selected
+verifier must be present in the snapshot or local deployment configuration.
 The precise local adapter schema is to be finalized against walt.id v1.2.0.
 
 An outer bundle signature authenticates the snapshot and its associations.
-The embedded Status List JWT still has its own signature and authorized signer;
-validate it as required by the pinned status-list specification. Preserve its
+The embedded Status List JWT still has its own signature and authorized signer,
+whose `status_lists` scope must include that list identifier. Each project
+status list uses `status_list.bits: 2`; this width is mandatory for the selected
+profile, rather than a configurable choice. Validate the token as required by
+the pinned status-list specification. Preserve its
 original compact encoding instead of parsing and re-signing it during packing.
 
 ## 5. Acceptance and installation
 
 1. Download to a temporary file on the same filesystem as the accepted bundle,
    with bounded transfer size/time. Keep the current accepted file intact.
-2. Verify the outer signature using provisioned keys and allowed algorithms.
+2. Verify the one outer signature using any one authorized public key from the
+   locally provisioned project certificate set and ES256. A candidate's `kid`
+   only selects among those local keys; it cannot introduce a key or fetch one.
    Parse and validate the signed schema, identifier, sequence, publication
    time, resource uniqueness, and issuer/key delegations.
 3. Validate every required resource, including signed status lists, identifier
-   matching, index/bit-width support, and acceptable keys. Resolve references
+   matching, mandatory two-bit status entries, valid indices, and acceptable
+   keys with the explicit role and list-ID scope. Resolve references
    exclusively from this candidate snapshot or deployment-supplied material.
    Bound expanded status-list sizes as well as compressed/file sizes.
 4. Construct the complete new in-memory view. Reject incomplete, conflicting,
@@ -197,8 +237,8 @@ validity. Never enter it automatically after refresh failure.
 
 The pinned IETF status-list draft requires an explicit Status List JWT `exp`
 to be respected when present. For project-controlled lists intended to work
-with indefinite holdover, propose omitting that optional (RECOMMENDED) claim
-and documenting the availability rationale. Include `iat` and propose
+with indefinite holdover, omit that optional (RECOMMENDED) claim; this is the
+accepted availability choice for project-controlled lists. Include `iat` and
 `ttl: 86400` as refresh guidance. Enforce local 73-hour freshness in normal
 mode. If a supplied list does contain `exp`, reject it after that deadline;
 manual holdover does not turn an expired list into a conforming one.

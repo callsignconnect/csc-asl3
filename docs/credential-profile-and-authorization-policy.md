@@ -1,6 +1,6 @@
 # Draft: Call Sign Connect credential profile and SIP guest authorization
 
-Status: discussion draft 0.6. This document specifies intended behavior; it does
+Status: discussion draft 0.7. This document specifies intended behavior; it does
 not describe functionality already implemented by the prototype. Accepted
 decisions are stated explicitly. Remaining format choices, configuration-key
 names, and illustrative examples are subject to review.
@@ -76,14 +76,19 @@ Working references and implementation candidate:
 | `vct` | Required exact value `tag:callsignconnect.cloud,2026-10:call-sign-attestation:1`. |
 | `iss` | Required issuer identifier; the project's default issuer uses `tag:callsignconnect.cloud,2026-10:issuer`. Resolve it only through supplied trust material, never remote issuer discovery. An identifier alone does not establish trust. |
 | `iat` | Required issuance time. It does not replace the assertion's validity interval. |
-| `nbf`, `exp` | Required start and end of the time interval for which the issuer attests the holder's right to assert the call sign. Accept only while `nbf <= now < exp`, subject to a small configured clock tolerance. |
-| `cnf` | Required binding to the holder's public key, as specified by the chosen SD-JWT VC profile. |
+| `nbf`, `exp` | Required start and end of the time interval for which the issuer attests the holder's right to assert the call sign. Accept only while `nbf <= now < exp`, with zero clock-skew allowance. |
+| `cnf.jwk` | Required P-256 holder public key, bound by the issuer signature. This is part of the issued credential, not a new key for each presentation. |
 | `status.status_list` | Required native draft-21 reference containing an integer `idx` and tag-URI `uri`. The entire reference is issuer-signed and not selectively disclosable; the list is supplied in the bundle. |
 
 The CPS must ensure that the issued interval does not exceed the interval
 supported by the evidence or delegation. These dates do not imply that a
 personal licence exists. Separate source-document validity dates should be
 added only if they convey a distinct fact the application needs.
+
+Use the verifier's current clock without a grace period at either validity
+boundary. Keeping that clock correct is an operational responsibility; early
+rejection caused by a fast clock is not repaired by extending credential
+validity. Apply zero clock-skew allowance to presentation time checks too.
 
 Presentation must prove possession of the bound holder key. Verify the
 key-binding JWT, including its relationship to `cnf`, the intended verifier
@@ -95,6 +100,33 @@ let another browser claim its result. Section 6.1 specifies a browser-bound
 transaction using an independent secret cookie and a server-side association
 with the verifier session. Wallet nonce/key binding and browser binding solve
 different parts of the flow; neither replaces the other.
+
+The wallet retains the holder private key. Its public counterpart is inside
+the issuer-signed credential as `cnf.jwk`; neither is an ephemeral login key.
+The holder key must remain usable for as long as the holder wants to present
+that credential. Changing that key normally requires a newly issued
+credential. The verifier needs the public key only while checking the
+presentation and need not retain it as visitor data afterward.
+
+For each new presentation, the wallet creates a **Key Binding JWT (KB-JWT)**:
+a short signed proof using that holder private key. Its `aud` names the
+intended verifier, `nonce` binds the pending request, `iat` records proof
+creation, and `sd_hash` binds the exact presented SD-JWT and disclosures.
+This proves current control of the holder key; the issuer's potentially
+year-long `nbf`/`exp` interval answers a different question. A year-old proof
+cannot authorize a new presentation merely because the credential is valid.
+
+RFC 9901 requires an acceptable KB-JWT `iat` window as well as the fresh nonce.
+Use a bounded pending-transaction lifetime to define that window, rather than
+another independent credential-expiry period. With timestamps in seconds,
+require `floor(transaction_started_at) <= kb_iat <= response_received_at`
+and `response_received_at < transaction_deadline`. The floor accommodates
+whole-second timestamp precision, not clock skew. The transaction lifetime
+still needs to be selected; minutes rather than months are appropriate.
+Unsynchronized wallet clocks can therefore cause a presentation to fail.
+Consume its nonce once. Cookie resumption and subsequent calls use the
+remembered authorization and do not create a new wallet presentation or
+require another KB-JWT (section 6).
 
 The selected type identifier is
 `tag:callsignconnect.cloud,2026-10:call-sign-attestation:1`. The name
@@ -116,10 +148,12 @@ public key from an `x5c` header does not establish that trust.
 SD-JWT VC does not require an HTTPS `vct`. A tag URI has no automatic HTTPS
 retrieval location. At issuance, the issuer supplies type metadata directly to
 the wallet; the delivery mechanism is deferred until issuer integration. At
-verification, the integration supplies a local copy directly to walt.id through
-its supported metadata mechanism. Correct operation does not depend on a prior
-or login-time remote fetch. Check wallet and walt.id support for those delivery
-mechanisms. As a naming
+verification, the backend uses the supplied local metadata; do not enable a
+walt.id metadata policy that performs discovery or HTTP retrieval. If the
+chosen metadata includes integrity references, verify those against the exact
+supplied bytes. Skipping integrity verification is not an offline resolver.
+Correct operation does not depend on a prior or login-time remote fetch.
+Check wallet support for issuance-time delivery. As a naming
 comparison, the EUDI PID issuer uses `urn:eudi:pid:1` for Person Identification
 Data; the type describes the attested subject matter rather than using the
 generic word `credential` or `certificate`.
@@ -130,25 +164,25 @@ the disclosure and key-binding machinery. The project requires holder binding,
 including `cnf`, a verified `kb+jwt`, nonce/audience binding, and `sd_hash`.
 The final OpenID4VP flow uses DCQL, not legacy Presentation Exchange requests.
 
-Remaining cryptographic/flow choices are narrower than the specification pins:
+Selected cryptographic choices:
 
-- Proposed initial issuer and holder keys are P-256, with the holder public key
-  carried directly in `cnf.jwk`.
-- Proposed initial signing algorithm is ES256 for issuer JWTs, holder KB-JWTs,
-  Status List JWTs, and the verifier bundle. These are separately authorized
-  key roles, not one interchangeable signing key. X.509 path-validation
-  algorithms are a separate policy from the JWT algorithm allowlists.
-- Proposed disclosure hash is SHA-256 (`_sd_alg: "sha-256"`). Select explicit
-  allowed algorithms rather than trusting a supplied header to expand them.
-- Set the KB-JWT maximum age and allowed clock skew. Verification must still
-  use a fresh transaction nonce and the actual verifier audience; time checks
-  alone do not bind a presentation to a login.
-- Select the OpenID4VP response mode, verifier/client identification and request
-  signing configuration. If encrypted responses are chosen, their encryption
-  algorithms are a separate decision from signature algorithms.
+- P-256 issuer and holder keys, with the holder public key directly in
+  `cnf.jwk`.
+- ES256 for issuer JWTs, holder KB-JWTs, Status List JWTs, and the verifier
+  bundle. Use distinct bundle-signing, credential-issuance, and status-signing
+  keys, including for the project's default issuer. The wallet's holder key
+  has its separate proof-of-possession role. X.509 certificate-signature
+  algorithms are a separate policy from these JOSE allowlists.
+- SHA-256 for disclosures (`_sd_alg: "sha-256"`). Select explicit allowed
+  algorithms; a supplied header cannot expand them.
+- Zero clock-skew allowance. Bound proof freshness by the pending transaction
+  as above; select its lifetime during integration.
 
-The algorithm and key-representation choices above are proposals for wallet
-interoperability testing, not implicit consequences of selecting draft -22.
+These are explicit project decisions, not implicit consequences of selecting
+draft -22. Test the selected subset with the intended wallet and walt.id.
+OpenID4VP verifier identification, request signing and response mode remain
+to be selected as described in section 6.1. If response encryption is selected,
+its algorithms are a separate decision from ES256 signature validation.
 
 ### 3.2 Application claims
 
@@ -277,7 +311,7 @@ Draft -21 defines status values rather than a W3C `statusPurpose` field:
 | 2: SUSPENDED | Reject while temporarily invalid, if the issuer uses this state. |
 | Other/unsupported value | Reject; never treat an unknown value as valid. |
 
-One bit can encode only 0/1. Two bits are proposed so later suspension can be
+One bit can encode only 0/1. Use two bits so later suspension can be
 represented without changing an existing list's bit width; the initial access
 decision admits only zero either way. The IETF draft does not impose an
 irreversible transition for INVALID. An issuer policy may make revocation
@@ -287,8 +321,14 @@ withdrawal, but is not necessary for this ASL3 access rule. Neither revocation
 nor suspension instructs a relying service to delete accounts, stored objects,
 or other business data. Those lifecycles are separate policy decisions.
 
-For indefinite holdover, project-controlled Status List JWTs are proposed to
-omit their optional `exp` deliberately, retaining local freshness enforcement
+The list encodes a current credential status, not a complete historical
+record of when a station-log signing key was trustworthy. Long-term log
+verification may need effective revocation times, reasons and retained
+evidence; a later suspension/revocation alone does not determine whether an
+earlier log signature was valid. That separate use case is deferred.
+
+For indefinite holdover, project-controlled Status List JWTs deliberately
+omit their optional `exp`, retaining local freshness enforcement
 and `ttl` refresh guidance. If a list includes `exp`, draft -21 requires it to
 be respected; holdover cannot silently override it while claiming conformance.
 See [verifier-bundle-format.md](verifier-bundle-format.md) for the rationale.
@@ -327,12 +367,22 @@ lists can therefore admit disjoint prefix sets through data alone. Issuer
 names, certificate subject names, `kid`, and remotely discovered keys are not
 independent trust anchors.
 
+Key roles state what a trusted key may sign. Credential keys attest the
+credential claims; status-list keys sign the specified status lists; project
+bundle keys authenticate the distribution snapshot. A key authorized for one
+role is not automatically authorized for another. Holder keys prove possession
+and are bound by individual credentials, not listed as issuer authorities.
+Use distinct keys for issuance, status and bundle signing. A separate status
+key must also be scoped to the lists whose values it can authorize.
+
 The backend must have a trustworthy link between the verified credential and
 the signing-key/trust-path result. Neither an issuer-name match nor a
-browser-supplied `verified` flag is an adequate substitute. Determine whether
-the required policy is best implemented inside a supported walt.id verification
-policy interface or through an authenticated server-side result containing
-sufficient verification evidence.
+browser-supplied `verified` flag is an adequate substitute. Use walt.id's
+protected server-side result to correlate the successful issuer-signature
+policy's public key and verified data with the expected credential/query and
+successful presentation/holder-binding checks. The backend then enforces
+local issuer/key authority, metadata, status and admission rules. An internal
+policy plugin is not assumed: v1.2.0's credential-policy classes are sealed.
 
 The trust list and attached material include everything needed to identify
 trusted issuers and validate their signing authority. Supply type metadata
@@ -371,9 +421,16 @@ The list signer must be authorized for the relevant credential status. It may
 be distinct from the credential issuer only through explicit trust delegation.
 The bundle's authenticated association with a list and the list JWT's own
 signature must both be checked. No JSON-LD/context-processing mechanism is
-required. A proposed single-file compact-JWS distribution, signing options,
+required. The selected single-file compact-JWS distribution, proposed
 trust-list schema, and atomic-installation procedure are in
 [verifier-bundle-format.md](verifier-bundle-format.md).
+
+For this integration, assume the authorized bundle-verification certificates
+are provisioned locally. One valid ES256 bundle signature under any one of
+their public keys suffices. Project trustee/root/intermediate issuance,
+renewal and distribution mechanisms are outside this task; the bundle cannot
+supply its own trust anchor. These keys remain distinct from the default
+issuer's credential- and status-signing keys.
 
 ### 4.2 Refresh, freshness, and holdover
 
@@ -426,8 +483,8 @@ Distinguish refresh guidance from a hard validity limit. Local snapshot age,
 Status List Token `ttl`, and cached CRL refresh information are handled by the
 chosen normal/holdover freshness policy. An explicit Status List JWT `exp`
 must still be checked under pinned draft -21 and cannot be overridden by
-holdover. Project-controlled lists intended for indefinite holdover are
-proposed to omit that optional expiry, with the availability rationale recorded
+holdover. Project-controlled lists intended for indefinite holdover
+omit that optional expiry, with the availability rationale recorded
 in the bundle design. This intentionally departs from a RECOMMENDED claim,
 not a mandatory one. Credential and issuer/delegation validity remain separate
 checks. Neither mode repairs missing material or invalid signatures.
@@ -577,6 +634,43 @@ logs. Browser binding prevents another browser claiming a completed result; it
 does not by itself prevent a person approving an attacker-initiated wallet
 request. Wallet identification of the verifier and deliberate approval remain
 necessary. Do not assume the wallet remembers a previous disclosure decision.
+
+#### OpenID4VP request and response choices
+
+These options describe how the wallet identifies the verifier and exchanges
+the presentation; they do not introduce another OIDC Provider or change the
+credential issuer's identity.
+
+| Choice | Meaning and candidates |
+| --- | --- |
+| Verifier/client identification | Tells the wallet who is asking and which key may sign the request. Pre-registration needs a wallet-configured client. `x509_san_dns` binds a signed request to a certificate's DNS SAN and a chain the wallet trusts. `verifier_attestation` needs an attestation issuer trusted by the wallet. DID/federation mechanisms add their own resolution/trust systems. |
+| Request transport and signing | An HTTPS `request_uri` lets the wallet retrieve the request, including a signed Request Object when the identification method permits it. This deliberate protocol fetch is distinct from forbidden issuer/status/metadata discovery. |
+| `direct_post` response | The wallet POSTs the presentation directly to the verifier's HTTPS `response_uri`; the originating browser retrieves its result through the backend. Works with a same-device wallet or a QR code scanned on another device. |
+| `direct_post.jwt` response | The same delivery path with an encrypted JWE response envelope. In final 1.0 this is response encryption, not an additional response signature. Issuer and holder signatures inside the presentation remain mandatory. |
+
+A candidate for wallet interoperability testing is
+`client_id: x509_san_dns:csc-dev.rtdev.cloud`, an ES256-signed Request Object
+with its certificate chain in `x5c`, an HTTPS `request_uri`, and a same-host
+`response_uri`. The wallet must trust the request-signing certificate chain
+and check its DNS SAN; a certificate trusted by our backend alone is
+insufficient. Request-signing credentials have a separate role from issuer,
+holder and bundle keys. The alternative `redirect_uri:` identification prefix
+does not allow signed requests under final 1.0.
+
+For encrypted responses, ECDH-ES/P-256 with A128GCM and a per-request encryption
+key is a candidate, not an accepted algorithm choice yet. That public
+encryption key can be ephemeral; it is distinct from the credential's holder
+`cnf.jwk`. Verify wallet and pinned-release support before selecting the mode.
+The Digital Credentials API is another transport requiring a separate browser
+and wallet compatibility decision.
+
+The operational client identifier follows OpenID4VP's defined identification
+method; an arbitrary `tag:` client ID does not automatically authenticate the
+verifier. Credential issuer/type/status/bundle identifiers remain tag URIs.
+For this non-DC-API flow, use the actual full client identifier when checking
+the holder proof audience. DC API instead uses its defined `origin:` audience.
+Request signing and response encryption do not replace the browser-bound
+transaction above or by themselves prevent QR-code relay/phishing.
 
 ### 6.2 Remembered authorization and resumption
 
@@ -751,21 +845,49 @@ normal call-end cleanup, and the interaction with `app_rpt` need real tests.
 
 The tag issuer and offline status policy require explicit verifier integration.
 The v1.2.0 key resolver can extract a verification key from an `x5c` header for
-a tag issuer, but a tag plus `kid` alone does not automatically select a locally
-pinned bare key. Supply the required resolver and independently enforce
-certificate/key authorization. Its built-in status policy also has a remote
-fetch path and can report status policy unavailable when the reference is
-absent. Do not enable that behavior as an admission shortcut: provide a local
-bundle resolver/policy and separately enforce the mandatory status reference.
-The v1.2.0 release includes Verifier API 2, final OpenID4VP/DCQL support, and
-RFC 9901-related tests. Its SD-JWT documentation still references an older VC
-draft, however, and those tests do not prove complete draft -22 conformance.
-Web caching is not the same as a locally installed immutable snapshot: an HTTP
-cache miss can trigger retrieval. Test the selected credential/holder-binding
-subset, tag-key/status resolution, supplied metadata, and failure behavior
-against this exact release. Pin the deployment artifact digest when packaging
-it; do not silently rely on behavior inspected only on `main`. These are
+a tag issuer. This provides a candidate integration route without forking:
+require the expected presentation and successful signature/holder-binding
+results, obtain the verified key and claims through the protected management
+API, and enforce trust/status/metadata/admission in our backend. An `x5c`
+certificate supplies a public key, not trust; only the local snapshot or
+explicit local delegation can authorize it. A tag plus `kid` alone does not
+automatically select a locally pinned bare key. Supporting that representation
+would require an explicit-key library-composition path or resolver change;
+it is not a deployment-only configuration option already established.
+
+Do not enable the built-in remote status policy for this path. It owns a
+fetcher, can retrieve on a cache miss, and can report status policy unavailable
+when the reference is absent. Our backend instead requires the reference,
+validates the supplied list and checks its entry, enforcing normal/holdover
+freshness itself. Built-in web caching does not supply the immutable snapshot
+contract. Likewise, a metadata option that skips integrity checking is not a
+substitute for checking the supplied metadata. Test with presentation-time
+outbound retrieval blocked. These admission checks require integration code,
+but not a new OpenID4VP/SD-JWT cryptographic implementation.
+
+The v1.2.0 SD-JWT VC README cites **draft -03**; no coherent release-wide newer
+VC draft conformance claim was established. The code nevertheless accepts
+`dc+sd-jwt`, uses final OpenID4VP/DCQL and RFC 9901 disclosure checks/tests,
+and checks KB-JWT signature, type, audience, nonce, hash and freshness. The
+status codec tests cite status-list **draft -20**, not a complete -21
+conformance claim. These are documentation/coverage gaps, not evidence that
+API 2 only implements VC draft -03. Do not downgrade the whole credential
+profile to -03 solely on that README; keep -22 as the working reference
+until selected-subset tests establish an actual incompatibility. OpenID4VP
+1.0, P-256/ES256/SHA-256 and the backend's native draft-21 status checks
+remain selected. Pin the deployment artifact digest when packaging it; do
+not silently rely on behavior inspected only on `main`. These are
 release-source findings, not an end-to-end verifier validation already run.
+
+Time-policy defaults also need explicit integration. The release's credential
+expiry/not-before policies allow two seconds of skew by default and do not
+enforce this profile's required claim presence. The backend must require
+finite numeric `nbf`/`exp` claims and enforce `nbf <= now < exp` independently.
+The KB-JWT policy's default five-minute setting is a symmetric freshness
+window, not just a clock-tolerance setting; setting it to zero would reject
+ordinary proofs. Retain a suitable bounded built-in window and additionally
+enforce the strict transaction window above in the backend. An upstream
+policy success cannot waive these stricter admission checks.
 
 ## 8. Acceptance examples
 
@@ -784,6 +906,8 @@ These are future integration-test requirements, not tests already executed.
 | `3DN0ABC` and issuer prefix `3D[N-Z]` | Permit the syntax/prefix checks without a half-series classification. |
 | `G9V1XX` and issuer prefixes `9V`, `S6` | Reject: a substring occurrence is not an authorized prefix. |
 | Trusted issuer but missing holder proof, wrong audience/nonce, or replayed presentation | Reject. |
+| Credential remains valid for months but its KB-JWT belongs to an old transaction | Reject the presentation; credential lifetime does not extend a proof's freshness window. |
+| Verifier's clock has reached credential `exp`, even by a fraction of a second | Reject new authorization without expiry grace. |
 | Credential outside its assertion interval, revoked/suspended in the accepted snapshot, or required material unverifiable | Reject without an on-demand issuer/status fetch. |
 | Automatic refresh fails twice; authenticated snapshot is 72 hours old in normal mode | Accept the cache within the 73-hour limit, subject to other checks. |
 | Snapshot exceeds 73 hours in normal mode | Reject new authorizations, resumptions, and calls; do not enter holdover automatically. |
@@ -810,17 +934,19 @@ These are future integration-test requirements, not tests already executed.
 ## 9. Decisions remaining before implementation
 
 1. Test draft -22/RFC 9901 and final OpenID4VP 1.0's selected subset against
-   walt.id v1.2.0. Approve the proposed P-256/ES256/SHA-256 choices and choose
-   request/response options and key-binding freshness limits.
+   walt.id v1.2.0, including the selected P-256/ES256/SHA-256 choices. Choose
+   verifier identification, request signing, response mode/encryption and
+   pending-transaction lifetime; time checks have zero clock-skew allowance.
 2. Implement the accepted boolean call-sign expression, separate 63-character
    bound, and verifier-enforced prefix matching. Finalize the proposed limited
-   prefix-pattern grammar and input-size bounds. Approve the proposed two-bit
-   status width and deliberate omission of optional list expiry for project
-   holdover-compatible lists.
-3. Finalize the proposed signed bundle/trust-list schema, signing bootstrap and
-   rotation, prefix delegation, local metadata adapters, publication-time age
-   measurement, and atomic refresh/holdover installation mechanics. The
-   24-hour interval and 73-hour default maximum age remain selected.
+   prefix-pattern grammar, runtime compatibility for `prefixmatch`, and
+   input-size bounds. Two-bit status width and deliberate omission of optional
+   list expiry for project holdover-compatible lists are selected.
+3. Finalize the draft JSON-in-JWS trust-list schema, prefix/list delegation,
+   local metadata/status adapters, publication-time age measurement, and atomic
+   refresh/holdover installation mechanics. Assume authorized bundle signer
+   certificates are provisioned locally; trustee certificate infrastructure is
+   outside this task. The 24-hour interval and 73-hour maximum age remain selected.
 4. Select the sealed-ticket format/key lifecycle and remembered-authorization
    freshness rules. The active-session example is one day; established-call
    expiry enforcement and warning/reauthorization UX are deferred.
@@ -844,4 +970,8 @@ These are future integration-test requirements, not tests already executed.
 - [walt.id Verifier API 2 v1.2.0](https://github.com/walt-id/waltid-identity/tree/v1.2.0/waltid-services/waltid-verifier-api2).
 - [walt.id v1.2.0 key resolver](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/credentials/waltid-credential-key-resolver/src/commonMain/kotlin/id/walt/credentials/keyresolver/Crypto2JwtKeyResolver.kt).
 - [walt.id v1.2.0 web fetching](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/web/waltid-web-data-fetching/src/commonMain/kotlin/id/walt/webdatafetching/WebDataFetcher.kt).
+- [walt.id v1.2.0 presentation verification policies](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/credentials/waltid-verification-policies2-vp/src/commonMain/kotlin/id/walt/policies2/vp/policies/VPVerificationPolicyManager.kt).
+- [walt.id v1.2.0 SD-JWT README](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/sdjwt/waltid-sdjwt/README.md).
+- [walt.id v1.2.0 signature policy and verified-key result](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/credentials/waltid-verification-policies2/src/commonMain/kotlin/id/walt/policies2/vc/policies/CredentialSignaturePolicy.kt).
+- [walt.id v1.2.0 server-side session view](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/protocols/waltid-openid4vp-verifier/src/commonMain/kotlin/id/walt/verifier2/data/Verification2Session.kt).
 - [app_rpt mode documentation and implementation](https://github.com/AllStarLink/app_rpt/blob/22b60b5de6a7d99e3042f9b413d129dee3b97ad0/apps/app_rpt.c#L367).

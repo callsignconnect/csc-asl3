@@ -85,14 +85,22 @@ separate array entries provide the alternatives without requiring regex
 alternation. The second compactly represents the indicated range.
 
 The verifier enforces prefix semantics; the publisher does not supply anchors.
-Python's `Pattern.match(call_sign)` already starts at position zero and needs
-no `^`. An explicit compiler-generated anchor can make the contract visible:
+Use Python 3.15's `Pattern.prefixmatch(call_sign)` to state that operation
+explicitly; it starts at position zero and needs no `^`. An explicit
+compiler-generated anchor can also make the contract visible:
 
 ```python
+# Python 3.15 or later.
 # validated_pattern has already passed the restricted-language parser below.
 prefix_re = re.compile(r"\A(?:" + validated_pattern + r")")
-permitted = valid_call_sign(call_sign) and prefix_re.match(call_sign) is not None
+permitted = valid_call_sign(call_sign) and prefix_re.prefixmatch(call_sign) is not None
 ```
+
+`prefixmatch` was added in Python 3.15; `match` is its older, soft-deprecated
+name, with no scheduled removal. Older runtimes need that compatibility
+spelling or a wrapper with the same semantics. The deployment runtime or
+compatibility approach must be selected before implementation; this example
+does not change the application's runtime requirement.
 
 This code does not implement pattern validation. Never pass arbitrary trust-list
 text straight to a general regex compiler. If alternatives were ever introduced,
@@ -138,3 +146,7 @@ Use `X10CSC` for the corrected synthetic example, retaining the unallocated
 `X1` namespace. The prototype's old placeholder identity is application code
 to replace when implementing verifier authentication; this document does not
 change that code.
+
+## References
+
+- [Python 3.15 prefix matching](https://docs.python.org/3.15/library/re.html#re.prefixmatch).
