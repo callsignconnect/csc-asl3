@@ -1,6 +1,6 @@
 # Draft: Call Sign Connect credential profile and SIP guest authorization
 
-Status: discussion draft 0.5. This document specifies intended behavior; it does
+Status: discussion draft 0.6. This document specifies intended behavior; it does
 not describe functionality already implemented by the prototype. Accepted
 decisions are stated explicitly. Remaining format choices, configuration-key
 names, and illustrative examples are subject to review.
@@ -160,12 +160,15 @@ covered by the issuer signature and must be disclosed during presentation.
 | `call_sign` | One canonical call sign that the holder is entitled to assert under this attestation. It is the basis of the SIP identity and local list matching. |
 | `cps` | Required object containing an immutable, version-specific `uri`. An optional `sha256` binds the exact CPS document bytes. |
 
-`call_sign` must use uppercase ASCII letters and digits and satisfy the call
-sign formation rules in ITU Radio Regulations Nos. 19.68, 19.68.1, 19.68A, and
-19.69, together with the first-two-character rule in No. 19.50. Candidate
-regular expressions, their derivation, and conditional half-series/temporary
-forms are in [call-sign-syntax.md](call-sign-syntax.md). The formal validator
-must combine those shapes with the issuer's delegated formation authority.
+`call_sign` must use uppercase ASCII letters and digits, have at most 63
+characters, and full-match the single expression in
+[call-sign-syntax.md](call-sign-syntax.md). The combined syntax envelope is
+based on ITU Radio Regulations Nos. 19.50, 19.68, 19.68.1, 19.68A, and 19.69:
+it includes the two-initial-digit prohibition and three-character prefixes.
+The application length limit is separate from the regex and admits direct
+use as a single ASCII DNS label. No ordinary/special classification or shorter
+half-series suffix rule is retained or enforced; those assignment decisions
+belong to the administration and issuer, not a structural verifier record.
 Reject malformed or noncanonical signed values rather than silently fixing
 them. Local list entries use the same canonical representation.
 
@@ -173,6 +176,10 @@ Do not constrain syntax validation by the prefix allocations in Appendix 42.
 An issuer's authority to certify a prefix is determined by the configured
 project trust list and its attached delegation material (section 4). This
 separates syntactic validity from permission to assert a particular prefix.
+Test the entire call sign independently against the issuer's permitted prefix
+expressions using start-of-string matching. The trust list supplies literals
+and restricted positive character classes, not full regex flexibility or
+publisher-selected anchors. There is no captured structural prefix to compare.
 Use `X10CSC` or other syntactically compliant signs synthesized under the
 unallocated `X1` prefix for examples. Staging/test configurations can authorize
 only such prefixes and exclude allocated real-world prefixes through trust
@@ -312,7 +319,9 @@ Check signature validity, certificate/key usage, applicable validity and
 revocation, and delegation scope. In particular, the trust list specifies the
 call-sign prefixes the issuer may certify. Credential types, CPS versions, or
 administrative roles may also be constrained. Match the verified `call_sign`
-against that issuer/key's permitted prefix scope. The syntax validator does not
+against at least one of that issuer/key's permitted `prefixes` expressions at
+the beginning of the string. Prefix matching is a separate boolean decision
+and retains no call-sign type. The syntax validator does not
 contain the global prefix-allocation table. Production and staging/test trust
 lists can therefore admit disjoint prefix sets through data alone. Issuer
 names, certificate subject names, `kid`, and remotely discovered keys are not
@@ -767,10 +776,13 @@ These are future integration-test requirements, not tests already executed.
 | Valid holder-bound credential and authorized issuer, call sign not blocked | Permit call to a configured local node. |
 | Valid club/delegated/class-licence call-sign assertion under the issuer's CPS | Apply the same admission rule; no personal-licence document requirement. |
 | Correct issuer name but untrusted signing key, or wrong delegation scope | Reject. |
-| Syntactically valid `X10CSC` and issuer delegated the two-character `X1` form in staging | Permit if otherwise valid; no source-code exception for `X1`. |
+| Syntactically valid `X10CSC` and issuer permitted prefix `X1` in staging | Permit if otherwise valid; no source-code exception for `X1`. |
 | Earlier example `X1CSC` | Reject the malformed shape; do not exempt the prototype's old placeholder identity. |
 | Syntactically valid allocated prefix outside the staging issuer's delegation | Reject, even if Appendix 42 assigns that prefix in the real world. |
 | Malformed or nonuppercase signed `call_sign` | Reject regardless of prefix delegation. |
+| Syntactically matching call sign with 64 characters | Reject by the separate 63-character limit. |
+| `3DN0ABC` and issuer prefix `3D[N-Z]` | Permit the syntax/prefix checks without a half-series classification. |
+| `G9V1XX` and issuer prefixes `9V`, `S6` | Reject: a substring occurrence is not an authorized prefix. |
 | Trusted issuer but missing holder proof, wrong audience/nonce, or replayed presentation | Reject. |
 | Credential outside its assertion interval, revoked/suspended in the accepted snapshot, or required material unverifiable | Reject without an on-demand issuer/status fetch. |
 | Automatic refresh fails twice; authenticated snapshot is 72 hours old in normal mode | Accept the cache within the 73-hour limit, subject to other checks. |
@@ -800,10 +812,11 @@ These are future integration-test requirements, not tests already executed.
 1. Test draft -22/RFC 9901 and final OpenID4VP 1.0's selected subset against
    walt.id v1.2.0. Approve the proposed P-256/ES256/SHA-256 choices and choose
    request/response options and key-binding freshness limits.
-2. Review the call-sign expressions and trust-rule formation metadata, including
-   temporary suffix authority. Adopt a corrected synthetic example rather than
-   exempting `X1CSC`. Approve the proposed two-bit status width and deliberate
-   omission of optional list expiry for project holdover-compatible lists.
+2. Implement the accepted boolean call-sign expression, separate 63-character
+   bound, and verifier-enforced prefix matching. Finalize the proposed limited
+   prefix-pattern grammar and input-size bounds. Approve the proposed two-bit
+   status width and deliberate omission of optional list expiry for project
+   holdover-compatible lists.
 3. Finalize the proposed signed bundle/trust-list schema, signing bootstrap and
    rotation, prefix delegation, local metadata adapters, publication-time age
    measurement, and atomic refresh/holdover installation mechanics. The

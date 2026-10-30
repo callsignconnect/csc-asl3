@@ -60,8 +60,8 @@ change merely to rotate an issuer's credential-signing key.
 
 Yes: a JSON list of issuers, public keys, and prefixes is the right starting
 point. A useful minimal record also needs an unambiguous issuer identifier,
-key identity/role, credential-type scope, and enough formation information to
-apply the call-sign rules. The display name is informational.
+key identity/role, credential-type scope, and a list of permitted prefix
+expressions. The display name is informational.
 
 Proposed fields:
 
@@ -83,11 +83,15 @@ attached to a key, another key under the same issuer does not inherit it
 implicitly. Validate uniqueness and conflicting delegations when accepting
 the bundle, rather than allowing parser order to resolve them.
 
-Call-sign prefix entries should specify a formation rule as well as a prefix.
-The [call-sign syntax draft](call-sign-syntax.md) explains why half-series and
-temporary extended-suffix permissions cannot be inferred from the first
-successful regular-expression match. No Appendix 42 allocation database is
-compiled into the application.
+Use a `prefixes` array containing literal prefixes or the restricted
+character-class notation defined in [call-sign-syntax.md](call-sign-syntax.md).
+For example, SARTS can use `["9V", "S6"]` and FARA `["3D[N-Z]"]`.
+The verifier enforces start-of-string matching, independently of the full
+call-sign syntax check. The array supplies alternatives; publishers supply
+neither anchors nor unrestricted regex syntax. An empty array grants no
+authority. Validate all patterns while accepting a candidate bundle.
+There are no call-sign formation or temporary/special classification fields.
+No Appendix 42 allocation database is compiled into the application.
 
 ## 4. Illustrative payload
 
@@ -118,13 +122,7 @@ distribution endpoint and human-readable CPS reference need HTTPS URLs.
           "credential_types": [
             "tag:callsignconnect.cloud,2026-10:call-sign-attestation:1"
           ],
-          "prefix_rules": [
-            {
-              "prefix": "X1",
-              "formation": "two-character",
-              "temporary_extended_suffix": false
-            }
-          ]
+          "prefixes": ["X1"]
         }
       ]
     }

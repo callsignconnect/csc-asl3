@@ -1,11 +1,12 @@
-# Draft: call-sign syntax and delegated prefix validation
+# Draft: call-sign syntax and issuer prefix validation
 
-These expressions implement the formation shapes in ITU Radio Regulations
-2024 Volume 1, Nos. 19.50, 19.68, 19.68.1, 19.68A, and 19.69. They do not
-contain Appendix 42 allocations and are not, by themselves, issuer
-authorization checks.
+The verifier performs two independent boolean checks: the complete call sign
+has an accepted syntax and length, and it begins with a prefix authorized for
+the verified issuer/key. It does not extract or retain a call-sign type,
+nationality-identification structure, or ordinary/special classification.
 
-The primary text consulted is the ITU PDF reproduced in the
+The syntax is based on ITU Radio Regulations 2024 Volume 1, Nos. 19.50, 19.68,
+19.68.1, 19.68A, and 19.69. The primary text consulted is reproduced in the
 [pinned mirror](https://github.com/Zakaria010/Radio-RAG/blob/c944a90ec847378bae5fa09425ee4c2ef99508de/data/2400594-RR-Vol%201-E-A5.pdf),
 printed pages 269 and 271. The original publication is the
 [ITU Radio Regulations, 2024](https://www.itu.int/pub/R-REG-RR-2024).
@@ -13,122 +14,127 @@ The mirror's LFS content SHA-256 is
 `a19db60201342f44443143c01c528abe725b93cf133602631edaa2b6c9ba6a8f`.
 Its bytes were not independently compared with the currently hosted ITU file.
 
-## 1. Ordinary formation shapes
+## 1. Whole-call-sign validation
 
-Use ASCII character classes and Python `re.fullmatch`; do not use `\w`, `\d`,
-case folding, trimming, or an end anchor that accepts a trailing newline for
-the signed claim. Under No. 19.69, 0 and 1 are allowed for amateur stations.
+The accepted expression is:
 
-| Form | Full-match expression |
-| --- | --- |
-| One-character identification, No. 19.68 | `[BFGIKMNRW][0-9][A-Z0-9]{0,3}[A-Z]` |
-| Two-character identification, Nos. 19.50/19.68 | `(?:[A-Z][A-Z0-9]|[0-9][A-Z])[0-9][A-Z0-9]{0,3}[A-Z]` |
-| Three-character half-series identification, No. 19.68.1 | `(?:[A-Z][A-Z0-9]|[0-9][A-Z])[A-Z0-9][0-9][A-Z0-9]{0,2}[A-Z]` |
-
-The first form has a suffix of one through four characters, ending in a
-letter. The second has the same suffix constraint and a two-character prefix
-whose first two characters cannot both be digits. The half-series form has
-three identification characters and a suffix of one through three characters,
-ending in a letter. Its use requires the corresponding half-series authority;
-matching that expression alone does not establish it.
-
-The literal `[BFGIKMNRW]` comes from No. 19.68 itself. It is a formation rule,
-not an embedded lookup of currently allocated Appendix 42 series.
-
-## 2. Temporary extended suffixes
-
-No. 19.68A permits administrations to authorize more than four suffix
-characters for temporary special occasions. Add separate, explicitly
-authorized forms:
-
-```text
-[BFGIKMNRW][0-9][A-Z0-9]{4,}[A-Z]
-(?:[A-Z][A-Z0-9]|[0-9][A-Z])[0-9][A-Z0-9]{4,}[A-Z]
+```regex
+(?![0-9]{2})(?:[BFGIKMNRW]|[A-Z0-9]{2,3})[0-9][A-Z0-9]*[A-Z]
 ```
 
-These require at least five suffix characters and retain the final-letter
-condition. Do not grant them by default merely because the expression matches.
-The text does not explicitly relax the separate three-character suffix cap
-in No. 19.68.1; extending that form needs a justified interpretation and
-administrative authority, not a silent regex change.
+Apply it as a full-string match. Check the application's maximum length of
+**63 characters** separately, before matching. The expression admits only
+uppercase ASCII letters and digits, so a valid claim's character count equals
+its byte count and fits a single DNS label. This is an application limit, not
+an asserted ITU or SIP limit.
 
-The provision supplies no upper length limit for those special suffixes. A
-documented application input-size limit still needs to be selected for the
-HTTP/SIP implementation; it should not be misrepresented as an ITU limit.
+- The negative lookahead enforces No. 19.50's prohibition on two initial digits.
+- `[BFGIKMNRW]` is the one-character set explicitly specified by No. 19.68,
+  not an Appendix 42 allocation lookup.
+- `{2,3}` accommodates the other identification lengths, including half series.
+- `[0-9]` includes 0 and 1 as permitted for amateur stations by No. 19.69.
+- The final character must be a letter.
 
-## 3. Capture and authorize all possible parses
+Ordinary/special and half-series suffix-length distinctions are intentionally
+not enforced. Those assignment decisions belong to the administration and
+are faithfully preserved by the issuer. There are no separate temporary-use
+flags or formation grants in the verifier's trust data. The shared expression
+is the project's combined syntax envelope; it does not purport to check every
+regulatory obligation or grant legal operating rights.
 
-Use separate patterns so prefix, digit, and suffix remain available to the
-trust-policy evaluator:
+Python illustration, not an implementation in the application:
 
 ```python
 import re
 
-PREFIX2 = r"(?:[A-Z][A-Z0-9]|[0-9][A-Z])"
-FORMS = {
-    "one-character": re.compile(
-        r"(?P<prefix>[BFGIKMNRW])(?P<digit>[0-9])"
-        r"(?P<suffix>[A-Z0-9]{0,3}[A-Z])"
-    ),
-    "two-character": re.compile(
-        rf"(?P<prefix>{PREFIX2})(?P<digit>[0-9])"
-        r"(?P<suffix>[A-Z0-9]{0,3}[A-Z])"
-    ),
-    "half-series": re.compile(
-        rf"(?P<prefix>{PREFIX2}[A-Z0-9])(?P<digit>[0-9])"
-        r"(?P<suffix>[A-Z0-9]{0,2}[A-Z])"
-    ),
-    "temporary-one-character": re.compile(
-        r"(?P<prefix>[BFGIKMNRW])(?P<digit>[0-9])"
-        r"(?P<suffix>[A-Z0-9]{4,}[A-Z])"
-    ),
-    "temporary-two-character": re.compile(
-        rf"(?P<prefix>{PREFIX2})(?P<digit>[0-9])"
-        r"(?P<suffix>[A-Z0-9]{4,}[A-Z])"
-    ),
-}
+CALL_SIGN_RE = re.compile(
+    r"(?![0-9]{2})(?:[BFGIKMNRW]|[A-Z0-9]{2,3})[0-9][A-Z0-9]*[A-Z]"
+)
 
-def candidate_forms(call_sign):
-    return [
-        {"formation": name, **match.groupdict()}
-        for name, pattern in FORMS.items()
-        if (match := pattern.fullmatch(call_sign)) is not None
-    ]
+def valid_call_sign(call_sign):
+    return (
+        isinstance(call_sign, str)
+        and 1 <= len(call_sign) <= 63
+        and CALL_SIGN_RE.fullmatch(call_sign) is not None
+    )
 ```
 
-Authorize a candidate only if the verified issuer/key's trust-list delegation
-permits that identification prefix and formation, including any temporary
-extension. For example, `AB12C` admits both `AB + 1 + 2C` and `AB1 + 2 + C`.
-Do not pick the first or greediest parse and infer its authority. At least one
-candidate must satisfy the explicit delegation; no candidate means rejection.
+Use ASCII classes, not `\w` or `\d`. Do not case-fold, trim, or otherwise repair
+a malformed signed claim. Full matching also rejects a trailing newline.
+Portable prefixes/suffixes and slash-qualified operating labels are excluded.
 
-The illustrative bundle uses a base `formation` plus a
-`temporary_extended_suffix` flag. Map a candidate such as
-`temporary-two-character` to base formation `two-character` and additionally
-require that flag to be true; ordinary candidates do not require it. Do not
-compare those differently represented names literally and accidentally skip
-the extension permission check.
+## 2. Issuer-authorized prefixes
 
-Any additional prohibitions beyond the cited formation rules need their own
-documented rule. These expressions do not claim to encode every regulatory
-obligation or confer legal operating rights.
+The trust list supplies a `prefixes` array for each authorized issuer/key.
+At least one entry must match at the **beginning** of the already validated
+call sign. No match, or an empty array, means no authority. Do not search
+elsewhere in the call sign or require the prefix to match the entire value.
 
-## 4. Examples and the existing prototype identity
+Recommended representations for the examples discussed:
 
-| Value | Shape result |
+```json
+{"prefixes": ["9V", "S6"]}
+```
+
+```json
+{"prefixes": ["3D[N-Z]"]}
+```
+
+The first is equivalent to the intended prefix alternatives `(9V|S6)`;
+separate array entries provide the alternatives without requiring regex
+alternation. The second compactly represents the indicated range.
+
+The verifier enforces prefix semantics; the publisher does not supply anchors.
+Python's `Pattern.match(call_sign)` already starts at position zero and needs
+no `^`. An explicit compiler-generated anchor can make the contract visible:
+
+```python
+# validated_pattern has already passed the restricted-language parser below.
+prefix_re = re.compile(r"\A(?:" + validated_pattern + r")")
+permitted = valid_call_sign(call_sign) and prefix_re.match(call_sign) is not None
+```
+
+This code does not implement pattern validation. Never pass arbitrary trust-list
+text straight to a general regex compiler. If alternatives were ever introduced,
+`^9V|S6` would not anchor both branches when used with a search API; grouping
+inside the verifier-generated anchor avoids that ambiguity.
+
+### Proposed restricted pattern language
+
+Allow only uppercase ASCII letter/digit literals and positive character
+classes containing those characters or ranges within them, such as `[N-Z]`
+or `[0-3]`. Each pattern and class must be nonempty. Ranges must ascend and stay
+entirely within `A-Z` or entirely within `0-9`; reject `[0-Z]`, which crosses
+punctuation in ASCII.
+
+Do not permit groups, alternation, anchors, wildcards, quantifiers, escapes,
+negated classes, lookarounds, backreferences, or caller-supplied flags. The
+array supplies OR semantics. Parse and validate the restricted notation before
+compiling, and reject a candidate bundle containing an invalid pattern rather
+than skipping it or treating it as unrestricted. Each pattern consumes at least
+one and at most 63 call-sign characters; impose appropriate encoded-size and
+entry-count bounds on the bundle as well.
+
+There is no captured structural prefix to reconcile with the issuer's prefix
+expression: these are independent boolean checks. The project trustee delegates the
+namespace through signed trust data; no Appendix 42 allocation table or
+special-case test-prefix bypass is built into the code.
+
+## 3. Examples
+
+| Value/check | Result |
 | --- | --- |
-| `W1AW`, `M0ABC` | Ordinary one-character form. |
-| `9M2ABC`, `A65AB`, `X10CSC` | Ordinary two-character form; prefix authority is still required. |
-| `3DA0ABC` | Half-series form, requiring the applicable delegated authority. |
-| `AB12C` | Multiple ordinary parses; check the issuer's permitted form/prefix. |
-| `W1ABCD` | Four-character suffix permitted by the ordinary form. |
-| `W1ABCDE` | Requires the explicitly authorized temporary extended form. |
-| `W1`, `W1ABC1`, `11A`, `W1A/P`, lowercase, trailing whitespace/newline | Reject under these shapes. |
-| `X1CSC` | Reject: `X` is not a permitted one-character identification, and `X1` is not followed by the required digit. |
+| `W1AW`, `M0ABC`, `9M2ABC`, `A65AB`, `3DA0ABC`, `AB12C` | Accepted syntax; issuer prefix permission still required. |
+| `W1ABCDE`, `AX2020STAYHOME` | Accepted extended syntax without a separate special-call flag. |
+| `X10CSC` with issuer prefix `X1` | Accepted syntax and prefix check. |
+| `3DN0ABC` with issuer prefix `3D[N-Z]` | Accepted syntax and prefix check. |
+| `3DA0ABC` with issuer prefix `3D[N-Z]` | Valid syntax but outside that issuer's prefix authority. |
+| `G9V1XX` with issuer prefixes `9V` and `S6` | Valid syntax but neither prefix occurs at the beginning. |
+| `120A`, `11A`, `W1`, `W1ABC1`, `W1A/P`, lowercase, trailing whitespace/newline | Rejected syntax. |
+| Syntactically matching value with 64 characters | Rejected by the separate application length rule. |
+| `X1CSC` | Rejected: neither the one-character nor the two/three-character branch supplies the required digit position. |
 
-The previous documentation's `X1CSC` example was not consistent with the literal
-formation rules. Use `X10CSC` as the proposed correction: it retains the
-unallocated `X1` test namespace, then digit `0`, then suffix `CSC`. No production
-allocation check or test-only parser exception is needed. The prototype's
-current placeholder identity remains application code to replace when
-implementing verifier authentication; this document does not change that code.
+Use `X10CSC` for the corrected synthetic example, retaining the unallocated
+`X1` namespace. The prototype's old placeholder identity is application code
+to replace when implementing verifier authentication; this document does not
+change that code.
