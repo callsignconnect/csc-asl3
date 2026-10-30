@@ -1,6 +1,6 @@
 # Draft: Call Sign Connect credential profile and SIP guest authorization
 
-Status: discussion draft 0.4. This document specifies intended behavior; it does
+Status: discussion draft 0.5. This document specifies intended behavior; it does
 not describe functionality already implemented by the prototype. Accepted
 decisions are stated explicitly. Remaining format choices, configuration-key
 names, and illustrative examples are subject to review.
@@ -61,6 +61,16 @@ the credential presented to this service.
 Use the selected SD-JWT VC specification's standard metadata and presentation
 machinery rather than parallel application-specific equivalents.
 
+Working references and implementation candidate:
+
+| Component | Pin and status |
+| --- | --- |
+| SD-JWT VC | `draft-ietf-oauth-sd-jwt-vc-22`. |
+| Underlying SD-JWT | RFC 9901, normatively required by draft -22, including its key-binding verification rules. |
+| Presentation protocol | OpenID4VP 1.0 final, without compatibility with older drafts. |
+| Credential status | `draft-ietf-oauth-status-list-21` (IETF Token Status List), replacing the earlier W3C Bitstring Status List proposal. |
+| Verifier implementation candidate | walt.id identity `v1.2.0`, commit `ef516ecec4c79fd9fba6f1e8b226b52a4e8cf790`; use Verifier API 2, not the legacy API. Compatibility with the selected specification subset still needs testing. |
+
 | Item | Requirement and meaning |
 | --- | --- |
 | `vct` | Required exact value `tag:callsignconnect.cloud,2026-10:call-sign-attestation:1`. |
@@ -68,7 +78,7 @@ machinery rather than parallel application-specific equivalents.
 | `iat` | Required issuance time. It does not replace the assertion's validity interval. |
 | `nbf`, `exp` | Required start and end of the time interval for which the issuer attests the holder's right to assert the call sign. Accept only while `nbf <= now < exp`, subject to a small configured clock tolerance. |
 | `cnf` | Required binding to the holder's public key, as specified by the chosen SD-JWT VC profile. |
-| Credential status reference | Required identification of a bundled W3C Bitstring Status List and an index within it. Section 3.3 shows a proposed project reference claim; section 4 defines local-only list resolution. |
+| `status.status_list` | Required native draft-21 reference containing an integer `idx` and tag-URI `uri`. The entire reference is issuer-signed and not selectively disclosable; the list is supplied in the bundle. |
 
 The CPS must ensure that the issued interval does not exceed the interval
 supported by the evidence or delegation. These dates do not imply that a
@@ -114,16 +124,31 @@ comparison, the EUDI PID issuer uses `urn:eudi:pid:1` for Person Identification
 Data; the type describes the attested subject matter rather than using the
 generic word `credential` or `certificate`.
 
-Record the supported specification versions and protocol options. This means
-the precise SD-JWT VC/underlying SD-JWT specification revisions, the
-`dc+sd-jwt` credential format and required holder binding, approved signature
-algorithms, and OpenID4VP 1.0 with its chosen query/response options. In
-particular, distinguish the final DCQL-based OpenID4VP protocol from older
-drafts using Presentation Exchange definitions. This is an interoperability
-configuration, not a further assurance level or a requirement to adopt another
-ecosystem profile. Select a supported walt.id release and test those exact
-capabilities; the choice of product does not establish that its defaults meet
-this document.
+Draft -22 determines the `dc+sd-jwt` format and issuer JWT type; do not accept
+the older `vc+sd-jwt` spelling as a compatibility fallback. RFC 9901 determines
+the disclosure and key-binding machinery. The project requires holder binding,
+including `cnf`, a verified `kb+jwt`, nonce/audience binding, and `sd_hash`.
+The final OpenID4VP flow uses DCQL, not legacy Presentation Exchange requests.
+
+Remaining cryptographic/flow choices are narrower than the specification pins:
+
+- Proposed initial issuer and holder keys are P-256, with the holder public key
+  carried directly in `cnf.jwk`.
+- Proposed initial signing algorithm is ES256 for issuer JWTs, holder KB-JWTs,
+  Status List JWTs, and the verifier bundle. These are separately authorized
+  key roles, not one interchangeable signing key. X.509 path-validation
+  algorithms are a separate policy from the JWT algorithm allowlists.
+- Proposed disclosure hash is SHA-256 (`_sd_alg: "sha-256"`). Select explicit
+  allowed algorithms rather than trusting a supplied header to expand them.
+- Set the KB-JWT maximum age and allowed clock skew. Verification must still
+  use a fresh transaction nonce and the actual verifier audience; time checks
+  alone do not bind a presentation to a login.
+- Select the OpenID4VP response mode, verifier/client identification and request
+  signing configuration. If encrypted responses are chosen, their encryption
+  algorithms are a separate decision from signature algorithms.
+
+The algorithm and key-representation choices above are proposals for wallet
+interoperability testing, not implicit consequences of selecting draft -22.
 
 ### 3.2 Application claims
 
@@ -137,8 +162,10 @@ covered by the issuer signature and must be disclosed during presentation.
 
 `call_sign` must use uppercase ASCII letters and digits and satisfy the call
 sign formation rules in ITU Radio Regulations Nos. 19.68, 19.68.1, 19.68A, and
-19.69. The formal validator must implement those provisions, including their
-exceptions; a simplified guessed regular expression is not the specification.
+19.69, together with the first-two-character rule in No. 19.50. Candidate
+regular expressions, their derivation, and conditional half-series/temporary
+forms are in [call-sign-syntax.md](call-sign-syntax.md). The formal validator
+must combine those shapes with the issuer's delegated formation authority.
 Reject malformed or noncanonical signed values rather than silently fixing
 them. Local list entries use the same canonical representation.
 
@@ -146,11 +173,16 @@ Do not constrain syntax validation by the prefix allocations in Appendix 42.
 An issuer's authority to certify a prefix is determined by the configured
 project trust list and its attached delegation material (section 4). This
 separates syntactic validity from permission to assert a particular prefix.
-Use `X1CSC` or other syntactically compliant signs synthesized under the
+Use `X10CSC` or other syntactically compliant signs synthesized under the
 unallocated `X1` prefix for examples. Staging/test configurations can authorize
 only such prefixes and exclude allocated real-world prefixes through trust
 data, without source-code exceptions. Malformed signs remain invalid even in
 staging; an unallocated prefix is a different issue.
+
+The previous `X1CSC` example fails the literal No. 19.68 shapes: `X` is not
+one of its permitted single-character identifications, and `X1` is not
+followed by the required digit. `X10CSC` corrects the example without changing
+the `X1` trust namespace or adding a source-code exception.
 
 Portable prefixes/suffixes, alternative call signs, and operating-location
 assertions are outside the profile. These are operating obligations beyond
@@ -169,10 +201,9 @@ login. The holder/subject may open its URI in a browser to read the procedure.
 
 This is a logical claim-set illustration, not an encoded SD-JWT or an issuable
 example. The type and default issuer identifiers and CPS URL are selected;
-holder-key coordinates are placeholders. `X1CSC` is synthetic and requires an
-appropriate test trust-list delegation. The status-list URL and index are
-illustrative, and the `credentialStatus` spelling is a proposed project
-extension as explained below.
+holder-key coordinates are placeholders. `X10CSC` is synthetic and requires an
+appropriate test trust-list delegation. The status-list identifier and index
+are illustrative and use the pinned IETF mechanism, not a project extension.
 
 ```json
 {
@@ -189,44 +220,71 @@ extension as explained below.
       "y": "<holder-public-key-y>"
     }
   },
-  "call_sign": "X1CSC",
+  "call_sign": "X10CSC",
   "cps": {
     "uri": "https://callsignconnect.cloud/issuer/cp-cps-1.0"
   },
-  "credentialStatus": {
-    "type": "BitstringStatusListEntry",
-    "statusPurpose": "revocation",
-    "statusListIndex": "42",
-    "statusListCredential": "https://callsignconnect.cloud/verifiers/status/revocation-1",
-    "statusSize": 1
+  "status": {
+    "status_list": {
+      "idx": 42,
+      "uri": "tag:callsignconnect.cloud,2026-10:status-list:1"
+    }
   }
 }
 ```
 
 The per-credential status reference identifies **which list**, **which entry**,
-and **what the entry means**. It does not embed the list in each credential.
-The proposed object reuses W3C Bitstring Status List entry fields: the index is
-a decimal string, and `statusSize: 1` explicitly selects one bit per entry.
-For the illustrated revocation purpose, zero means not revoked and one means
-revoked. An entry `id` is optional and is omitted here. Assign indices without
-deriving them from call signs or other identity information.
+and the status mechanism. `idx` is a nonnegative JSON integer, not a decimal
+string. Require the whole `status` reference directly in the issuer-signed
+claims, not selectively disclosable; reject it if missing or malformed.
+Assign indices without deriving them from call signs or other identity data.
 
-SD-JWT VC is distinct from W3C's Verifiable Credentials Data Model. Its native
-`status.status_list` mechanism refers to the IETF Token Status List, which is
-not the W3C Bitstring Status List selected here. Using `credentialStatus` as
-shown is therefore an explicit project SD-JWT VC extension, not a claim of
-generic status interoperability or of W3C conformance for the enclosing holder
-credential. Keep this required reference directly in the issuer-signed claims,
-not selectively disclosable; reject it if missing, malformed, or unsupported.
-The status-list credential itself follows the W3C Bitstring Status List format.
+Resolve `uri` exactly against an entire Status List JWT included in the
+authenticated bundle. The list JWT's `sub` must equal that identifier. Draft
+-21 permits URI schemes other than HTTPS and an agreed alternative distribution
+mechanism; the project uses tag identifiers and supplied local resources. No
+match means rejection, with no network fallback. Check the authorized list
+signer, signature, index bounds, bit width, and any hard expiry.
 
-Resolve `statusListCredential` by exact identifier against the complete list
-included in the authenticated trust bundle. The illustrative HTTPS value is
-an identifier for that supplied object, not permission to fetch it. No match
-means rejection, with no network fallback. Bounds-check the index, match the
-list's purpose, and verify the list's authorized signer and securing mechanism.
-The precise extension spelling and signed list representation remain to be
-tested against the selected verifier implementation.
+An illustrative Status List JWT has protected `typ: "statuslist+jwt"` and a
+payload like this (the compressed list is a placeholder):
+
+```json
+{
+  "sub": "tag:callsignconnect.cloud,2026-10:status-list:1",
+  "iat": 1793318400,
+  "ttl": 86400,
+  "status_list": {
+    "bits": 2,
+    "lst": "<base64url-zlib-compressed-status-values>"
+  }
+}
+```
+
+Draft -21 defines status values rather than a W3C `statusPurpose` field:
+
+| Value | Meaning and initial verifier behavior |
+| --- | --- |
+| 0: VALID | Eligible for the remaining credential/authorization checks. |
+| 1: INVALID | Reject; may represent revocation, cancellation, or similar invalidity. |
+| 2: SUSPENDED | Reject while temporarily invalid, if the issuer uses this state. |
+| Other/unsupported value | Reject; never treat an unknown value as valid. |
+
+One bit can encode only 0/1. Two bits are proposed so later suspension can be
+represented without changing an existing list's bit width; the initial access
+decision admits only zero either way. The IETF draft does not impose an
+irreversible transition for INVALID. An issuer policy may make revocation
+terminal and require reissuance; EUDI's ARF does so for its own credentials.
+Suspension can be useful during a reversible investigation or temporary
+withdrawal, but is not necessary for this ASL3 access rule. Neither revocation
+nor suspension instructs a relying service to delete accounts, stored objects,
+or other business data. Those lifecycles are separate policy decisions.
+
+For indefinite holdover, project-controlled Status List JWTs are proposed to
+omit their optional `exp` deliberately, retaining local freshness enforcement
+and `ttl` refresh guidance. If a list includes `exp`, draft -21 requires it to
+be respected; holdover cannot silently override it while claiming conformance.
+See [verifier-bundle-format.md](verifier-bundle-format.md) for the rationale.
 
 ### 3.4 Deferred attributes and use cases
 
@@ -287,20 +345,26 @@ Neither that identifier nor the directory grants a metadata-discovery route.
 All automated issuer information comes from the trust list and attached
 material. Human access to the CPS is separate from verifier processing.
 
-Use W3C Bitstring Status List v1.0 for credential status. Include the complete
-secured status-list credential, including its encoded bitstring and required
-verification material, with the trust list rather than supplying only a link.
-If more than one list is required, include every list referenced by the
-accepted credentials. Preserve the list's identifier so the resolver can find
-it locally. This publication/distribution choice does not require a verifier
-to contact either the issuer or a status-list URL during verification.
+Use tag URIs for identifiers that do not require HTTPS retrieval to perform
+their function: issuer, credential type, status-list identity, bundle/schema
+identity, and stable key identifiers. Keep HTTPS URLs where fetching is the
+intended operation: the scheduled bundle download and human-readable CPS URI.
+Do not invent an HTTPS object identifier just because a local resolver could
+avoid following it.
+
+Use the pinned IETF Token Status List mechanism. Include the complete signed
+Status List JWT and required verification material in the trust bundle, not
+only a reference. Include every list needed by the accepted credentials and
+preserve its tag `sub` identifier for local lookup. Verification does not
+contact an issuer or dereference a status identifier over the network.
 
 The list signer must be authorized for the relevant credential status. It may
 be distinct from the credential issuer only through explicit trust delegation.
-The bundle's authenticated association with a list and the list's own securing
-format must be defined; do not discard signatures or treat an arbitrary
-embedded bitstring as authorized status material. Select a supported securing
-representation without introducing remote JSON-LD/context resolution.
+The bundle's authenticated association with a list and the list JWT's own
+signature must both be checked. No JSON-LD/context-processing mechanism is
+required. A proposed single-file compact-JWS distribution, signing options,
+trust-list schema, and atomic-installation procedure are in
+[verifier-bundle-format.md](verifier-bundle-format.md).
 
 ### 4.2 Refresh, freshness, and holdover
 
@@ -317,13 +381,12 @@ Distinguish these objects even if one distribution mechanism carries them:
 - Removal or limitation of an issuer's project delegation.
 - Revocation of an issuer signing certificate/key, including any applicable
   X.509 certificate revocation list (CRL).
-- Revocation or suspension of an individual credential, represented by the
-  complete Bitstring Status List material attached to the trust list.
+- Invalidity or suspension of an individual credential, represented by the
+  complete IETF Status List Token attached to the trust list.
 
-The last item is not the same format or object as an X.509 CRL. The status-list
-format is selected; finalize the SD-JWT reference extension and signed
-representation during integration. A status URL does not authorize content or
-network retrieval independently of the trust bundle.
+The last item is not the same format or object as an X.509 CRL. Its status-list
+format and native SD-JWT reference are selected. A tag status identifier is
+resolved solely through supplied resources, never remote retrieval.
 
 All login, resumption, and new-call validation uses the locally supplied
 snapshot. Do not fetch issuer metadata, keys, trust chains, type metadata, CRLs,
@@ -338,7 +401,7 @@ Two cache-acceptance modes are specified:
 
 | Mode | Acceptance and failure behavior |
 | --- | --- |
-| Normal (default) | Maximum cache age is 73 hours since the last successful authenticated refresh of the required snapshot. Reuse the snapshot during refresh failures within that window; after it, reject new authorizations, resumptions, and calls until a successful refresh. This allows two consecutive missed 24-hour refresh attempts. |
+| Normal (default) | Maximum accepted snapshot age is 73 hours. Reuse it during refresh failures within that window; after it, reject new authorizations, resumptions, and calls until a successful refresh. This allows two consecutive missed 24-hour refresh attempts. The proposed signed bundle time determines age; re-fetching old signed bytes must not reset it. |
 | Manual indefinite holdover | An administrator deliberately selects the last verified snapshot for offline operation. Treat that snapshot as authoritative without an age cutoff for the duration of the selected mode. Do not enter this mode automatically after refresh failure. |
 
 Holdover is intended for planned Field Day, EmComm, and beyond-grid operation.
@@ -350,12 +413,15 @@ delegation validity checks also remain separate from cache freshness. Log the
 administrator's holdover selection and when normal operation resumes, and make
 the active mode visible to the administrator.
 
-Cached-artifact publication freshness deadlines, such as CRL `nextUpdate`, are
-handled under the selected cache policy, including the explicit holdover
-override. They must not silently impose a shorter refresh-failure window than
-the configured policy. This is distinct from extending the underlying call
-sign assertion or an issuer/delegation's own validity. Missing or unverifiable
-required material is not repaired by either mode.
+Distinguish refresh guidance from a hard validity limit. Local snapshot age,
+Status List Token `ttl`, and cached CRL refresh information are handled by the
+chosen normal/holdover freshness policy. An explicit Status List JWT `exp`
+must still be checked under pinned draft -21 and cannot be overridden by
+holdover. Project-controlled lists intended for indefinite holdover are
+proposed to omit that optional expiry, with the availability rationale recorded
+in the bundle design. This intentionally departs from a RECOMMENDED claim,
+not a mandatory one. Credential and issuer/delegation validity remain separate
+checks. Neither mode repairs missing material or invalid signatures.
 
 With normal operation, the local revocation-detection delay can be up to 73
 hours during refresh failures, assuming promptly published updates. Manual
@@ -662,7 +728,7 @@ integration points before choosing implementation details:
   persistent user or per-call files.
 - Local type/issuer/trust metadata delivery and the two cache-failure modes,
   with no remote metadata-resolution fallback.
-- Local-only resolution of the complete bundled Bitstring Status List, with a
+- Local-only resolution of the complete bundled IETF Status List Token, with a
   required reference/presence check and no silently skipped status policy.
 - Sealed-cookie resumption with no persistent server-side visitor record.
 - Selection of per-call `P`/`S` mode, command isolation, and the mode-dependent
@@ -675,15 +741,22 @@ authorization-expiry call timer. Mode behavior, linked-node behavior, PTT,
 normal call-end cleanup, and the interaction with `app_rpt` need real tests.
 
 The tag issuer and offline status policy require explicit verifier integration.
-Current walt.id source can extract a verification key from an `x5c` header for
+The v1.2.0 key resolver can extract a verification key from an `x5c` header for
 a tag issuer, but a tag plus `kid` alone does not automatically select a locally
 pinned bare key. Supply the required resolver and independently enforce
 certificate/key authorization. Its built-in status policy also has a remote
 fetch path and can report status policy unavailable when the reference is
 absent. Do not enable that behavior as an admission shortcut: provide a local
 bundle resolver/policy and separately enforce the mandatory status reference.
-These are source-inspection findings, not proof of behavior in the release
-eventually selected for deployment.
+The v1.2.0 release includes Verifier API 2, final OpenID4VP/DCQL support, and
+RFC 9901-related tests. Its SD-JWT documentation still references an older VC
+draft, however, and those tests do not prove complete draft -22 conformance.
+Web caching is not the same as a locally installed immutable snapshot: an HTTP
+cache miss can trigger retrieval. Test the selected credential/holder-binding
+subset, tag-key/status resolution, supplied metadata, and failure behavior
+against this exact release. Pin the deployment artifact digest when packaging
+it; do not silently rely on behavior inspected only on `main`. These are
+release-source findings, not an end-to-end verifier validation already run.
 
 ## 8. Acceptance examples
 
@@ -694,7 +767,8 @@ These are future integration-test requirements, not tests already executed.
 | Valid holder-bound credential and authorized issuer, call sign not blocked | Permit call to a configured local node. |
 | Valid club/delegated/class-licence call-sign assertion under the issuer's CPS | Apply the same admission rule; no personal-licence document requirement. |
 | Correct issuer name but untrusted signing key, or wrong delegation scope | Reject. |
-| Syntactically valid `X1CSC` and issuer explicitly delegated `X1` in staging | Permit if otherwise valid; no source-code exception for `X1`. |
+| Syntactically valid `X10CSC` and issuer delegated the two-character `X1` form in staging | Permit if otherwise valid; no source-code exception for `X1`. |
+| Earlier example `X1CSC` | Reject the malformed shape; do not exempt the prototype's old placeholder identity. |
 | Syntactically valid allocated prefix outside the staging issuer's delegation | Reject, even if Appendix 42 assigns that prefix in the real world. |
 | Malformed or nonuppercase signed `call_sign` | Reject regardless of prefix delegation. |
 | Trusted issuer but missing holder proof, wrong audience/nonce, or replayed presentation | Reject. |
@@ -717,24 +791,23 @@ These are future integration-test requirements, not tests already executed.
 | Repeated INVITE belongs to the same SIP transaction | Do not create another call or consume another admission. |
 | Verifier observes an unknown signing key or status reference | Reject using local data only; schedule any investigation/refresh separately. |
 | Default issuer uses the tag identifier, and its signing key is authorized by supplied material | Verify without HTTPS issuer discovery; do not infer trust from the identifier. |
-| Credential refers to a Bitstring Status List included in the trust bundle | Check the indicated entry using that exact local list, without a status-URL request. |
+| Credential refers to an IETF Status List Token by tag identifier | Match its `sub` and check the numeric `idx` using the exact bundled token, without a request. |
 | Required status reference is missing or the referenced list is absent | Reject; a skipped/unavailable status policy is not success. |
+| A list includes `exp` and is expired during manual holdover | Reject that list under draft -21; holdover is not an expiry bypass. |
 
 ## 9. Decisions remaining before implementation
 
-1. Confirm the project SD-JWT status-reference extension and signed Bitstring
-   Status List representation. The `vct`, default issuer identifier, default
-   CPS URL, publication roles, and full-list bundling are selected. Additional
-   attributes, licence-class vocabularies, and remote-HF assurance policy are
-   deferred.
-2. Record the supported specification versions and protocol options for
-   SD-JWT VC/SD-JWT and OpenID4VP, derive the call-sign syntax validator from
-   the cited Radio Regulations provisions, and settle the supported status
-   purposes, including any suspension semantics.
-3. Specify the signed trust-list/delegation format and prefix-scope encoding,
-   issuer certification rules, local metadata interfaces, and complete snapshot
-   refresh/holdover mechanics. The refresh interval and default maximum age
-   are selected, not open configuration-policy questions.
+1. Test draft -22/RFC 9901 and final OpenID4VP 1.0's selected subset against
+   walt.id v1.2.0. Approve the proposed P-256/ES256/SHA-256 choices and choose
+   request/response options and key-binding freshness limits.
+2. Review the call-sign expressions and trust-rule formation metadata, including
+   temporary suffix authority. Adopt a corrected synthetic example rather than
+   exempting `X1CSC`. Approve the proposed two-bit status width and deliberate
+   omission of optional list expiry for project holdover-compatible lists.
+3. Finalize the proposed signed bundle/trust-list schema, signing bootstrap and
+   rotation, prefix delegation, local metadata adapters, publication-time age
+   measurement, and atomic refresh/holdover installation mechanics. The
+   24-hour interval and 73-hour default maximum age remain selected.
 4. Select the sealed-ticket format/key lifecycle and remembered-authorization
    freshness rules. The active-session example is one day; established-call
    expiry enforcement and warning/reauthorization UX are deferred.
@@ -747,13 +820,15 @@ These are future integration-test requirements, not tests already executed.
 - [ITU Radio Regulations, 2024 edition](https://www.itu.int/pub/R-REG-RR-2024), Nos. 19.68, 19.68.1, 19.68A, and 19.69; Appendix 42 allocation checks are not part of this profile's syntax validator.
 - [RFC 3261 SIP INVITE transaction processing](https://www.rfc-editor.org/rfc/rfc3261.html#section-17.1.1.1) and [authentication retry behavior](https://www.rfc-editor.org/rfc/rfc3261.html#section-22.2).
 - [RFC 7118: SIP over WebSocket](https://www.rfc-editor.org/rfc/rfc7118.html).
-- [SD-JWT-based Verifiable Credentials](https://datatracker.ietf.org/doc/draft-ietf-oauth-sd-jwt-vc/).
-- [SD-JWT VC type identifiers and metadata](https://github.com/oauth-wg/oauth-sd-jwt-vc/blob/main/draft-ietf-oauth-sd-jwt-vc.md).
-- [W3C Bitstring Status List v1.0](https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/), especially BitstringStatusListEntry and privacy-preserving distribution.
+- [SD-JWT VC, pinned draft -22](https://github.com/oauth-wg/oauth-sd-jwt-vc/blob/draft-ietf-oauth-sd-jwt-vc-22/draft-ietf-oauth-sd-jwt-vc.md).
+- [SD-JWT, RFC 9901](https://www.rfc-editor.org/rfc/rfc9901.html).
+- [IETF Token Status List, pinned draft -21](https://github.com/oauth-wg/draft-ietf-oauth-status-list/tree/draft-ietf-oauth-status-list-21).
+- [EUDI ARF credential-revocation requirements](https://github.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework/blob/main/docs/annexes/annex-2/annex-2.02-high-level-requirements-by-topic.md#VCR_04).
 - [RFC 4151: The tag URI Scheme](https://www.rfc-editor.org/rfc/rfc4151.html).
 - [EUDI reference issuer PID type metadata](https://github.com/eu-digital-identity-wallet/eudi-srv-pid-issuer/blob/main/src/main/resources/vct/pid_v1.4.json).
-- [OpenID for Verifiable Presentations 1.0](https://openid.net/specs/openid-4-verifiable-presentations-1_0.html).
-- [walt.id Verifier API 2](https://github.com/walt-id/waltid-identity/tree/main/waltid-services/waltid-verifier-api2).
-- [walt.id key resolver source inspected](https://github.com/walt-id/waltid-identity/blob/dac938ca5a7e2d9dd67aa65f94a88ef03d201c90/waltid-libraries/credentials/waltid-credential-key-resolver/src/commonMain/kotlin/id/walt/credentials/keyresolver/Crypto2JwtKeyResolver.kt).
-- [walt.id status-policy implementation inspected](https://github.com/walt-id/waltid-identity/blob/dac938ca5a7e2d9dd67aa65f94a88ef03d201c90/waltid-libraries/credentials/waltid-verification-policies2/src/commonMain/kotlin/id/walt/policies2/vc/policies/status/StatusPolicyImplementation.kt).
+- [OpenID for Verifiable Presentations 1.0 final](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html).
+- [walt.id identity v1.2.0 release](https://github.com/walt-id/waltid-identity/releases/tag/v1.2.0).
+- [walt.id Verifier API 2 v1.2.0](https://github.com/walt-id/waltid-identity/tree/v1.2.0/waltid-services/waltid-verifier-api2).
+- [walt.id v1.2.0 key resolver](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/credentials/waltid-credential-key-resolver/src/commonMain/kotlin/id/walt/credentials/keyresolver/Crypto2JwtKeyResolver.kt).
+- [walt.id v1.2.0 web fetching](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/web/waltid-web-data-fetching/src/commonMain/kotlin/id/walt/webdatafetching/WebDataFetcher.kt).
 - [app_rpt mode documentation and implementation](https://github.com/AllStarLink/app_rpt/blob/22b60b5de6a7d99e3042f9b413d129dee3b97ad0/apps/app_rpt.c#L367).
