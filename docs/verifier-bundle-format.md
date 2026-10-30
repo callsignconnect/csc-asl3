@@ -20,11 +20,9 @@ JOSE implementation to sign and verify the exact JWS payload bytes. JSON
 canonicalization is not needed when verifying those original bytes. This is
 a signed data file, not an archive that must be unpacked before validation.
 
-| Option | Trade-off |
-| --- | --- |
-| Compact JWS containing JSON and complete embedded resources | Selected. Fits existing JOSE tooling; one signature/file; no archive paths or extraction semantics. Base64url adds size overhead, normally acceptable for this bundle. |
-| ZIP or tar.gz containing resources and an embedded signed manifest | Appropriate if there are many binary resources. The manifest must bind every accepted file by identifier, size, and digest. Reject duplicate names, unlisted content, traversal paths, links, and decompression excesses; validate before installation. More machinery than the initial bundle needs. |
-| CMS SignedData or COSE_Sign1 containing the snapshot | Standard single-file signed containers. CMS fits X.509 tooling; COSE/CBOR is compact. Both add another protocol/tooling family without an immediate need here. |
+The selected format is **Compact JWS containing JSON and complete embedded
+resources**: one signature and one file, without archive paths or extraction
+semantics. Base64url adds size overhead, normally acceptable for this bundle.
 
 A detached signature beside the bundle would require a second response unless
 both are packaged in a single outer file. HTTPS authentication remains enabled
@@ -246,6 +244,47 @@ manual holdover does not turn an expired list into a conforming one.
 Similarly, avoid an outer bundle format with a mandatory hard expiry if it
 must support the selected holdover behavior. An intrinsic issuer/delegation
 or credential expiry is distinct from a snapshot refresh deadline.
+
+## 7. Remaining schema decisions and proposed v1 defaults
+
+The container, signing algorithms, local bundle-verification certificates,
+embedded resources, status width and refresh/holdover model are selected.
+The remaining work is to make the trust-list associations and validation
+rules precise. The following defaults are proposed, rather than additional
+accepted policy decisions:
+
+| Decision | Proposed v1 rule |
+| --- | --- |
+| What authorizes an issuer key? | The authenticated bundle entry is the delegation. Its public P-256 JWK is authoritative; an optional supplied certificate must contain the same leaf public key and cannot add authority. A separate project certification path is not required for this initial representation. |
+| How is a credential bound to that entry? | Exact-match signed credential `iss` to issuer `id`, then match the successfully verified signing public key to that issuer's authorized key. A protected `kid`, when supplied, is a selector within that issuer and must agree with the selected key. Neither issuer name nor `kid` alone grants trust. |
+| Who owns a status list? | Add an `issuer` owner to each status resource. Initially require credential `iss`, resource owner and Status List JWT `iss` to agree, and require JWT `sub` to equal resource `id`. Verify the separate status key's explicit `status_lists` scope. Requiring `iss` is an application-profile rule beyond the IETF draft's baseline. Cross-issuer/shared status services would need a later explicit delegation rule. |
+| How long does a delegation last? | In the minimal representation a key remains authorized while present in the accepted snapshot; removal/restriction affects subsequent admissions. If an actual delegation has a finite validity period, represent and enforce it explicitly rather than silently extending it through holdover. Finalize the names and requiredness of any such bounds before a dated delegation is used. |
+| How are identity, ambiguity and rotation handled? | Unique issuer IDs, unique key IDs within each issuer and unique resource IDs; no conflicting ownership or duplicate JSON object members. Retaining multiple old/new keys and overlapping prefix scopes is allowed for rotation. Credential and status signing keys remain distinct. |
+
+The current abridged example predates the proposed status-resource `issuer`
+field. Before treating that example as a usable v1 payload, add the owner
+and the corresponding required Status List JWT `iss` and enforce the
+cross-resource associations above.
+
+The remaining format mechanics can be chosen during implementation:
+
+- Define required and optional fields in a machine-readable JSON Schema and
+  reject unknown fields for that schema version. Use public-only P-256 JWKs;
+  reject private key parameters and role-inappropriate fields.
+- Require the expected schema and bundle-stream identifiers, a nonnegative
+  integer sequence and an integer publication timestamp. Reject future
+  publication, rollback and changed bytes claiming an accepted sequence.
+  An exact retry of the accepted bytes is harmless and does not refresh age.
+- Require type metadata `vct` to equal its resource ID, status JWT `sub` to
+  equal its resource ID, and every required reference to resolve locally.
+  Validate these relationships in code as well as JSON field shapes.
+- Set explicit file, decompression, field-length and entry-count limits;
+  specify certificate/resource encodings and reject missing or duplicate
+  resources. These are parser and deployment bounds, not another trust model.
+
+Once these associations are agreed, the JSON Schema plus semantic validator
+can make the format usable without specifying the future trustee PKI or
+waiting for support for additional wallets.
 
 ## References
 

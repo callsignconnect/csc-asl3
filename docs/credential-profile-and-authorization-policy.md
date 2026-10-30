@@ -1,6 +1,6 @@
 # Draft: Call Sign Connect credential profile and SIP guest authorization
 
-Status: discussion draft 0.7. This document specifies intended behavior; it does
+Status: discussion draft 0.8. This document specifies intended behavior; it does
 not describe functionality already implemented by the prototype. Accepted
 decisions are stated explicitly. Remaining format choices, configuration-key
 names, and illustrative examples are subject to review.
@@ -70,6 +70,7 @@ Working references and implementation candidate:
 | Presentation protocol | OpenID4VP 1.0 final, without compatibility with older drafts. |
 | Credential status | `draft-ietf-oauth-status-list-21` (IETF Token Status List), replacing the earlier W3C Bitstring Status List proposal. |
 | Verifier implementation candidate | walt.id identity `v1.2.0`, commit `ef516ecec4c79fd9fba6f1e8b226b52a4e8cf790`; use Verifier API 2, not the legacy API. Compatibility with the selected specification subset still needs testing. |
+| Initial wallet target | Sphereon Wallet on Android. Record the actual application version/build before testing; support for other wallets is deferred. |
 
 | Item | Requirement and meaning |
 | --- | --- |
@@ -88,7 +89,8 @@ added only if they convey a distinct fact the application needs.
 Use the verifier's current clock without a grace period at either validity
 boundary. Keeping that clock correct is an operational responsibility; early
 rejection caused by a fast clock is not repaired by extending credential
-validity. Apply zero clock-skew allowance to presentation time checks too.
+validity. The wallet's clock is treated separately: its KB-JWT `iat` has the
+one-hour tolerance below. That allowance never extends credential validity.
 
 Presentation must prove possession of the bound holder key. Verify the
 key-binding JWT, including its relationship to `cnf`, the intended verifier
@@ -117,16 +119,36 @@ year-long `nbf`/`exp` interval answers a different question. A year-old proof
 cannot authorize a new presentation merely because the credential is valid.
 
 RFC 9901 requires an acceptable KB-JWT `iat` window as well as the fresh nonce.
-Use a bounded pending-transaction lifetime to define that window, rather than
-another independent credential-expiry period. With timestamps in seconds,
-require `floor(transaction_started_at) <= kb_iat <= response_received_at`
-and `response_received_at < transaction_deadline`. The floor accommodates
-whole-second timestamp precision, not clock skew. The transaction lifetime
-still needs to be selected; minutes rather than months are appropriate.
-Unsynchronized wallet clocks can therefore cause a presentation to fail.
-Consume its nonce once. Cookie resumption and subsequent calls use the
-remembered authorization and do not create a new wallet presentation or
-require another KB-JWT (section 6).
+Cap the complete pending presentation transaction at **900 seconds (15
+minutes)**, measured on the server. At its deadline, forget an unclaimed nonce
+and pending result, remove the temporary encryption private key, and refuse
+completion. A successful transaction consumes its nonce once. Wallet-clock
+tolerance does not extend this deadline.
+
+Allow **3,600 seconds (one hour) of wallet clock skew in either direction**.
+With finite numeric timestamps in seconds, require:
+
+```text
+transaction_deadline = transaction_started_at + 900
+response_received_at < transaction_deadline
+floor(transaction_started_at) - 3600 <= kb_iat <= response_received_at + 3600
+```
+
+Use a monotonic server timer for the elapsed transaction deadline, alongside
+the wall-clock timestamps used for `iat` comparison. Completion/token delivery
+must also occur before the same transaction deadline. The floor only
+accommodates whole-second timestamp precision. Anchoring the lower bound to
+transaction start allows the user to spend the full 15 minutes on the flow
+even when the phone clock is an hour slow. At receipt this can admit a signed
+timestamp almost 75 minutes old, while the actual proof is still bound to a
+nonce issued less than 15 minutes ago. A fixed symmetric 60-minute proof-age
+limit would incorrectly reject some such presentations.
+
+`iat` is the holder's signed assertion of creation time, not an independent
+trusted timestamp. Freshness/replay protection also depends on the local,
+unpredictable, audience-bound, single-use nonce and bounded transaction.
+Cookie resumption and subsequent calls use the remembered authorization and
+do not create a new wallet presentation or require another KB-JWT (section 6).
 
 The selected type identifier is
 `tag:callsignconnect.cloud,2026-10:call-sign-attestation:1`. The name
@@ -175,14 +197,15 @@ Selected cryptographic choices:
   algorithms are a separate policy from these JOSE allowlists.
 - SHA-256 for disclosures (`_sd_alg: "sha-256"`). Select explicit allowed
   algorithms; a supplied header cannot expand them.
-- Zero clock-skew allowance. Bound proof freshness by the pending transaction
-  as above; select its lifetime during integration.
+- Zero clock-skew allowance for credential validity; a 15-minute pending
+  transaction and one-hour wallet `iat` tolerance, as specified above.
 
 These are explicit project decisions, not implicit consequences of selecting
-draft -22. Test the selected subset with the intended wallet and walt.id.
-OpenID4VP verifier identification, request signing and response mode remain
-to be selected as described in section 6.1. If response encryption is selected,
-its algorithms are a separate decision from ES256 signature validation.
+draft -22. Test the selected subset with Sphereon Wallet on Android and walt.id.
+The selected flow uses WebPKI DNS-name authentication without verifier
+pre-registration and `direct_post.jwt` with an ephemeral encryption key,
+subject to the wallet support check in section 6.1. The response-encryption
+algorithm pair remains separate from ES256 signature validation.
 
 ### 3.2 Application claims
 
@@ -564,6 +587,9 @@ trust_cache:
   refresh_interval_seconds: 86400
   max_cache_age_seconds: 262800  # 73 hours in normal mode
   mode: normal                 # normal or manual_holdover
+presentation:
+  transaction_lifetime_seconds: 900
+  wallet_iat_clock_skew_seconds: 3600
 ```
 
 List and mode changes apply to newly established calls, including calls made
@@ -592,7 +618,7 @@ These are distinct lifecycles:
 
 | Object | Location and lifetime |
 | --- | --- |
-| Pending presentation transaction | Backend/verifier memory and a browser-binding cookie; short-lived and single-use. |
+| Pending presentation transaction | Backend/verifier memory and a browser-binding cookie; at most 15 minutes, single-use, with unclaimed nonce/result and ephemeral private key forgotten at the deadline. |
 | Sealed authorization/resumption ticket | Persistent Secure/HttpOnly browser cookie; may last up to the underlying call-sign authorization period, subject to browser retention and later freshness-policy decisions. No persistent server-side visitor record. |
 | Active session and opaque SIP access token | Backend memory, with the token held in browser memory; illustrative lifetime 86,400 seconds, capped by applicable authorization validity. |
 | Established call | Asterisk channel/dialog and necessary backend context; continues until ended, with no authorization-expiry hangup or call-duration limit in this iteration. |
@@ -611,8 +637,9 @@ identifier. One concrete same-origin flow is:
 2. The backend creates the walt.id verification session over localhost. In
    memory it records the public transaction identifier, a digest of the browser
    secret, verifier session identifier, expected nonce/audience, deadline, and
-   pending/consumed state. The browser receives request/QR-code data, never the
-   independent secret in a URL or QR code.
+   pending/consumed state. Set the deadline to 15 minutes from transaction
+   creation, shared with the verifier session expiry. The browser receives
+   request/QR-code data, never the independent secret in a URL or QR code.
 3. The wallet submits its presentation to the verifier. The backend obtains the
    authenticated outcome directly from the verifier over localhost and links
    it to that transaction. The wallet callback needs no browser cookie and
@@ -635,34 +662,38 @@ does not by itself prevent a person approving an attacker-initiated wallet
 request. Wallet identification of the verifier and deliberate approval remain
 necessary. Do not assume the wallet remembers a previous disclosure decision.
 
-#### OpenID4VP request and response choices
+#### Selected OpenID4VP request and response flow
 
-These options describe how the wallet identifies the verifier and exchanges
-the presentation; they do not introduce another OIDC Provider or change the
-credential issuer's identity.
+The initial supported wallet target is Sphereon Wallet on Android. The
+selected flow authenticates the verifier by its WebPKI DNS name without
+pre-registration and returns an encrypted presentation directly to the
+verifier. Verify these capabilities against an identified Android build
+before claiming interoperability; a feature in an SDK or development branch
+does not establish that it is available in the installed application.
 
-| Choice | Meaning and candidates |
+| Choice | Selected behavior |
 | --- | --- |
-| Verifier/client identification | Tells the wallet who is asking and which key may sign the request. Pre-registration needs a wallet-configured client. `x509_san_dns` binds a signed request to a certificate's DNS SAN and a chain the wallet trusts. `verifier_attestation` needs an attestation issuer trusted by the wallet. DID/federation mechanisms add their own resolution/trust systems. |
+| Verifier/client identification | `x509_san_dns` binds a signed request to the verifier's DNS SAN and a WebPKI chain trusted by the wallet. No verifier pre-registration or separate wallet project-root provisioning is assumed. |
 | Request transport and signing | An HTTPS `request_uri` lets the wallet retrieve the request, including a signed Request Object when the identification method permits it. This deliberate protocol fetch is distinct from forbidden issuer/status/metadata discovery. |
-| `direct_post` response | The wallet POSTs the presentation directly to the verifier's HTTPS `response_uri`; the originating browser retrieves its result through the backend. Works with a same-device wallet or a QR code scanned on another device. |
-| `direct_post.jwt` response | The same delivery path with an encrypted JWE response envelope. In final 1.0 this is response encryption, not an additional response signature. Issuer and holder signatures inside the presentation remain mandatory. |
+| `direct_post.jwt` response | The wallet POSTs an encrypted JWE response envelope to the verifier's HTTPS `response_uri`, using a fresh per-transaction encryption key advertised in the signed request. This is response encryption, not an additional response signature. Issuer and holder signatures inside the presentation remain mandatory. |
 
-A candidate for wallet interoperability testing is
+The development verifier uses
 `client_id: x509_san_dns:csc-dev.rtdev.cloud`, an ES256-signed Request Object
 with its certificate chain in `x5c`, an HTTPS `request_uri`, and a same-host
 `response_uri`. The wallet must trust the request-signing certificate chain
 and check its DNS SAN; a certificate trusted by our backend alone is
-insufficient. Request-signing credentials have a separate role from issuer,
-holder and bundle keys. The alternative `redirect_uri:` identification prefix
-does not allow signed requests under final 1.0.
+insufficient. The wallet must present the authenticated domain as the service
+identity to the user. Request-signing credentials have a separate role from
+issuer, holder and bundle keys. Merely using an HTTPS request URL does not
+replace authentication of the signed OpenID4VP request.
 
-For encrypted responses, ECDH-ES/P-256 with A128GCM and a per-request encryption
-key is a candidate, not an accepted algorithm choice yet. That public
-encryption key can be ephemeral; it is distinct from the credential's holder
-`cnf.jwk`. Verify wallet and pinned-release support before selecting the mode.
-The Digital Credentials API is another transport requiring a separate browser
-and wallet compatibility decision.
+For encrypted responses, ECDH-ES/P-256 with A128GCM remains the candidate
+algorithm pair pending the wallet/release capability check. The encryption
+keypair is ephemeral and distinct from the credential's holder `cnf.jwk`.
+Keep its private key only in verifier memory until completion or the 15-minute
+deadline. Do not silently downgrade to plaintext `direct_post` or an older
+presentation protocol if the selected wallet does not support this flow.
+The Digital Credentials API and other wallets are deferred.
 
 The operational client identifier follows OpenID4VP's defined identification
 method; an arbitrary `tag:` client ID does not automatically authenticate the
@@ -671,6 +702,41 @@ For this non-DC-API flow, use the actual full client identifier when checking
 the holder proof audience. DC API instead uses its defined `origin:` audience.
 Request signing and response encryption do not replace the browser-bound
 transaction above or by themselves prevent QR-code relay/phishing.
+
+#### User-facing failures
+
+Give the initiating browser a useful result through its existing protected
+result/polling route. Distinguish an expired 15-minute transaction, wallet
+cancellation, a verified proof timestamp outside the one-hour clock allowance,
+and an expired or otherwise unacceptable credential. For example:
+"Your wallet's reported signing time is outside the allowed range. Check
+your phone's date, time and automatic time setting, then try again."
+Do not assert that the phone clock is certainly the cause. Show that specific
+diagnosis only after the relevant signatures, audience and nonce checks
+support it. Otherwise use a general presentation failure message. Do not
+expose tokens, keys, raw credentials, trust-store internals or exception dumps.
+
+OpenID4VP's `error`/`error_description` Authorization Error Response primarily
+travels from wallet to verifier. It is not a portable verifier-to-wallet
+user-message channel. The direct-post response can carry a `redirect_uri`
+that the wallet follows, allowing a verifier-hosted result page; unrecognized
+extra JSON parameters must be ignored. Whether a wallet displays an HTTP
+failure's description itself is application-specific. Do not depend on that
+behavior for understandable failures.
+
+The inspected Sphereon mobile source follows a successful callback's JSON
+`redirect_uri` by opening the browser. It does not display arbitrary extra
+message fields. Its SDK's non-2xx error handling can show only generic HTTP
+status text, so returning a descriptive JSON error body is insufficient to
+guarantee readable guidance inside that wallet.
+
+The initiating browser remains the reliable place to show its authenticated
+transaction result. A wallet-side redirect page, if enabled, may show suitable
+generic guidance but does not receive the initiating browser's authorization
+or SIP token. Coordinate any callback-level denial/redirect with the backend:
+walt.id can acknowledge successful presentation processing before our local
+admission policy has decided whether to grant access. "Presentation received"
+and "access granted" are distinct outcomes.
 
 ### 6.2 Remembered authorization and resumption
 
@@ -884,10 +950,46 @@ expiry/not-before policies allow two seconds of skew by default and do not
 enforce this profile's required claim presence. The backend must require
 finite numeric `nbf`/`exp` claims and enforce `nbf <= now < exp` independently.
 The KB-JWT policy's default five-minute setting is a symmetric freshness
-window, not just a clock-tolerance setting; setting it to zero would reject
-ordinary proofs. Retain a suitable bounded built-in window and additionally
-enforce the strict transaction window above in the backend. An upstream
-policy success cannot waive these stricter admission checks.
+window. Configure `maxAgeMinutes: 76` for `dc+sd-jwt/kb-jwt_iat-check`, then
+have the backend enforce the exact transaction/skew window above. Sixty
+minutes would reject some valid 15-minute transactions from slow phone clocks.
+The extra minute above 75 accommodates timestamp precision in this upstream
+guard; it does not expand the backend's exact transaction/skew window.
+Set `core_flow.expiration_duration` to `PT15M` or use a shared explicit
+deadline. Replacing the VP-policy list must preserve the other required
+signature, audience, nonce, disclosure-hash and time checks; configuring this
+one policy is not permission to omit them. An upstream success cannot waive
+the backend's stricter admission checks.
+
+The pinned verifier supports `core_flow.encrypted_response: true`, generates
+a fresh P-256 response-encryption key for the direct-post session and advertises
+its public key. It supports ECDH-ES with A128GCM/A256GCM; restrict the advertised
+and accepted algorithm set to the eventual wallet-tested choice. Its
+`x509_san_dns` flow requires a signed request, `x5c` and the matching signing
+key. These service capabilities do not establish Sphereon Android support or
+the wallet's acceptance of a public WebPKI certificate chain.
+
+Sphereon capability evidence is mixed. The inspected public mobile source is
+version 0.9.0, commit `53335f5f0331df5c8708f3ecde1b7d1ddc7f9750`, using
+SDK 0.40.1; the public GitHub release v0.7.0 uses older dependencies. Neither
+identifies the Android store build actually selected for the demonstration.
+The newer SDK contains final OpenID4VP/DCQL, `dc+sd-jwt` and encrypted
+response support, but the following source findings need reproduction:
+
+- The app's request-certificate trust registry supplies Sphereon/Funke and
+  user-added anchors. Android/system WebPKI roots are not established as
+  request-object trust anchors merely because HTTPS retrieval succeeds.
+- Its first-contact path passes the raw non-DID client identifier to
+  `new URL(...)`; `x509_san_dns:csc-dev.rtdev.cloud` is not a URL accepted
+  by that parser. This can obstruct first use without a saved contact.
+- SDK 0.40.1's JWE creation path appears to omit the selected recipient
+  `kid`. Final OpenID4VP and the pinned verifier require the expected key
+  identifier; encryption support alone does not establish compatibility.
+
+These are source-inspection findings, not an Android interoperability test.
+Record the installed build and test the exact selected flow before treating
+Sphereon support as proved. Importing project roots or pre-registering a
+contact is not evidence that the selected no-registration WebPKI flow works.
 
 ## 8. Acceptance examples
 
@@ -907,6 +1009,9 @@ These are future integration-test requirements, not tests already executed.
 | `G9V1XX` and issuer prefixes `9V`, `S6` | Reject: a substring occurrence is not an authorized prefix. |
 | Trusted issuer but missing holder proof, wrong audience/nonce, or replayed presentation | Reject. |
 | Credential remains valid for months but its KB-JWT belongs to an old transaction | Reject the presentation; credential lifetime does not extend a proof's freshness window. |
+| Presentation or browser completion arrives at/after the transaction's 15-minute deadline | Reject and require a new transaction, irrespective of wallet `iat` tolerance. |
+| Proof is signed near transaction start on a phone one hour slow and received 14 minutes later | Permit the proof-time check if within the transaction/skew bounds; do not apply a fixed 60-minute proof-age cutoff. |
+| Validly signed, correctly bound proof reports a time outside the permitted wallet-clock window | Reject and give the bound browser guidance to check the phone clock. |
 | Verifier's clock has reached credential `exp`, even by a fraction of a second | Reject new authorization without expiry grace. |
 | Credential outside its assertion interval, revoked/suspended in the accepted snapshot, or required material unverifiable | Reject without an on-demand issuer/status fetch. |
 | Automatic refresh fails twice; authenticated snapshot is 72 hours old in normal mode | Accept the cache within the 73-hour limit, subject to other checks. |
@@ -934,13 +1039,17 @@ These are future integration-test requirements, not tests already executed.
 ## 9. Decisions remaining before implementation
 
 1. Test draft -22/RFC 9901 and final OpenID4VP 1.0's selected subset against
-   walt.id v1.2.0, including the selected P-256/ES256/SHA-256 choices. Choose
-   verifier identification, request signing, response mode/encryption and
-   pending-transaction lifetime; time checks have zero clock-skew allowance.
+   walt.id v1.2.0, including the selected P-256/ES256/SHA-256 choices. Prove
+   Sphereon Android WebPKI request identification, signed requests and
+   `direct_post.jwt` with ephemeral encryption. Record the tested wallet build
+   and select the encryption algorithm pair. Transaction lifetime is 15
+   minutes; wallet `iat` tolerance is one hour in each direction, while
+   credential validity has no grace period.
 2. Implement the accepted boolean call-sign expression, separate 63-character
    bound, and verifier-enforced prefix matching. Finalize the proposed limited
-   prefix-pattern grammar, runtime compatibility for `prefixmatch`, and
-   input-size bounds. Two-bit status width and deliberate omission of optional
+   prefix-pattern grammar and input-size bounds. Keep `prefixmatch` in the
+   illustration, but use the older `match` API for Debian 13's Python runtime.
+   Two-bit status width and deliberate omission of optional
    list expiry for project holdover-compatible lists are selected.
 3. Finalize the draft JSON-in-JWS trust-list schema, prefix/list delegation,
    local metadata/status adapters, publication-time age measurement, and atomic
@@ -974,4 +1083,8 @@ These are future integration-test requirements, not tests already executed.
 - [walt.id v1.2.0 SD-JWT README](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/sdjwt/waltid-sdjwt/README.md).
 - [walt.id v1.2.0 signature policy and verified-key result](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/credentials/waltid-verification-policies2/src/commonMain/kotlin/id/walt/policies2/vc/policies/CredentialSignaturePolicy.kt).
 - [walt.id v1.2.0 server-side session view](https://github.com/walt-id/waltid-identity/blob/v1.2.0/waltid-libraries/protocols/waltid-openid4vp-verifier/src/commonMain/kotlin/id/walt/verifier2/data/Verification2Session.kt).
+- [Sphereon mobile certificate trust registry, inspected commit](https://github.com/Sphereon-Opensource/ssi-mobile-wallet/blob/53335f5f0331df5c8708f3ecde1b7d1ddc7f9750/src/agent/trustAnchorRegistry.ts).
+- [Sphereon mobile request/contact and callback handling, inspected commit](https://github.com/Sphereon-Opensource/ssi-mobile-wallet/blob/53335f5f0331df5c8708f3ecde1b7d1ddc7f9750/src/services/machines/siopV2MachineService.ts).
+- [Sphereon SDK 0.40.1 encrypted response creation](https://github.com/Sphereon-Opensource/SSI-SDK/blob/e51d450fceab02b6da01c8b88de9532a09d1e913/packages/siopv2-oid4vp-op-auth/src/session/OpSession.ts).
+- [Sphereon SDK 0.40.1 JWE implementation](https://github.com/Sphereon-Opensource/SSI-SDK/blob/e51d450fceab02b6da01c8b88de9532a09d1e913/packages/jwt-service/src/functions/JWE.ts).
 - [app_rpt mode documentation and implementation](https://github.com/AllStarLink/app_rpt/blob/22b60b5de6a7d99e3042f9b413d129dee3b97ad0/apps/app_rpt.c#L367).

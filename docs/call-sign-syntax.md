@@ -97,10 +97,10 @@ permitted = valid_call_sign(call_sign) and prefix_re.prefixmatch(call_sign) is n
 ```
 
 `prefixmatch` was added in Python 3.15; `match` is its older, soft-deprecated
-name, with no scheduled removal. Older runtimes need that compatibility
-spelling or a wrapper with the same semantics. The deployment runtime or
-compatibility approach must be selected before implementation; this example
-does not change the application's runtime requirement.
+name, with no scheduled removal. The implementation on ASL3/Debian 13 will
+use the older `Pattern.match(call_sign)` spelling with exactly the same
+prefix semantics, because its Python predates 3.15. Keep `prefixmatch` in
+this illustration; no application runtime upgrade is required.
 
 This code does not implement pattern validation. Never pass arbitrary trust-list
 text straight to a general regex compiler. If alternatives were ever introduced,
