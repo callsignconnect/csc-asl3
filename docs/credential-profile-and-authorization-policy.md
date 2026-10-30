@@ -70,7 +70,7 @@ Working references and implementation candidate:
 | Presentation protocol | OpenID4VP 1.0 final, without compatibility with older drafts. |
 | Credential status | `draft-ietf-oauth-status-list-21` (IETF Token Status List), replacing the earlier W3C Bitstring Status List proposal. |
 | Verifier implementation candidate | walt.id identity `v1.2.0`, commit `ef516ecec4c79fd9fba6f1e8b226b52a4e8cf790`; use Verifier API 2, not the legacy API. Compatibility with the selected specification subset still needs testing. |
-| Initial wallet target | Sphereon Wallet on Android. Record the actual application version/build before testing; support for other wallets is deferred. |
+| Initial wallet target | Sphereon Wallet **0.9.0 on Android**. Inspected source baseline: commit `53335f5f0331df5c8708f3ecde1b7d1ddc7f9750`. Record the exact APK/build provenance during testing; support for other wallets is deferred. |
 
 | Item | Requirement and meaning |
 | --- | --- |
@@ -201,7 +201,7 @@ Selected cryptographic choices:
   transaction and one-hour wallet `iat` tolerance, as specified above.
 
 These are explicit project decisions, not implicit consequences of selecting
-draft -22. Test the selected subset with Sphereon Wallet on Android and walt.id.
+draft -22. Test the selected subset with Sphereon Wallet 0.9.0 on Android and walt.id.
 The selected flow uses WebPKI DNS-name authentication without verifier
 pre-registration and `direct_post.jwt` with an ephemeral encryption key,
 subject to the wallet support check in section 6.1. The response-encryption
@@ -664,7 +664,7 @@ necessary. Do not assume the wallet remembers a previous disclosure decision.
 
 #### Selected OpenID4VP request and response flow
 
-The initial supported wallet target is Sphereon Wallet on Android. The
+The initial supported wallet target is Sphereon Wallet 0.9.0 on Android. The
 selected flow authenticates the verifier by its WebPKI DNS name without
 pre-registration and returns an encrypted presentation directly to the
 verifier. Verify these capabilities against an identified Android build
@@ -969,10 +969,11 @@ and accepted algorithm set to the eventual wallet-tested choice. Its
 key. These service capabilities do not establish Sphereon Android support or
 the wallet's acceptance of a public WebPKI certificate chain.
 
-Sphereon capability evidence is mixed. The inspected public mobile source is
-version 0.9.0, commit `53335f5f0331df5c8708f3ecde1b7d1ddc7f9750`, using
-SDK 0.40.1; the public GitHub release v0.7.0 uses older dependencies. Neither
-identifies the Android store build actually selected for the demonstration.
+Sphereon capability evidence is mixed. The selected target is version 0.9.0;
+the inspected public mobile source baseline is commit
+`53335f5f0331df5c8708f3ecde1b7d1ddc7f9750`, using SDK 0.40.1. Record the
+exact APK/build provenance when testing this target. The older public GitHub
+release v0.7.0 uses different dependencies and is not the selected target.
 The newer SDK contains final OpenID4VP/DCQL, `dc+sd-jwt` and encrypted
 response support, but the following source findings need reproduction:
 
@@ -1040,7 +1041,7 @@ These are future integration-test requirements, not tests already executed.
 
 1. Test draft -22/RFC 9901 and final OpenID4VP 1.0's selected subset against
    walt.id v1.2.0, including the selected P-256/ES256/SHA-256 choices. Prove
-   Sphereon Android WebPKI request identification, signed requests and
+   Sphereon Wallet 0.9.0 Android WebPKI request identification, signed requests and
    `direct_post.jwt` with ephemeral encryption. Record the tested wallet build
    and select the encryption algorithm pair. Transaction lifetime is 15
    minutes; wallet `iat` tolerance is one hour in each direction, while
